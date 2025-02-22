@@ -204,6 +204,10 @@ class Camera:
         self.camera.x += (x - self.camera.x) / self.smooth_speed
         self.camera.y += (y - self.camera.y) / self.smooth_speed
 
+    def collidepoint(self, point):
+        """检查点是否在相机范围内"""
+        return self.camera.collidepoint(point)
+
 
 class GameMap:
     def __init__(self):
@@ -537,11 +541,16 @@ POTIONS = [
 class NPC(pygame.sprite.Sprite):
     def __init__(self, pos, shop_items):
         super().__init__()
-        self.image = pygame.Surface((TILE_SIZE, TILE_SIZE))
-        self.image.fill(COLORS["npc"])
+        self.image = pygame.Surface((TILE_SIZE, TILE_SIZE), pygame.SRCALPHA)
+        self.image.fill((0, 0, 0, 0))
+
         self.rect = self.image.get_rect(topleft=pos)
-        self.shop_items = shop_items  # 商店物品列表（Equipment对象）
-        self.dialogue = "欢迎来到我的商店！"
+        self.shop_items = shop_items
+        self.interact_radius = 50
+
+    def can_interact(self, player_pos):
+        """检查玩家是否在可交互范围内"""
+        return pygame.math.Vector2(self.rect.center).distance_to(player_pos) <= self.interact_radius
 
 
 # 扩展的敌人类 --------------------------------------------------
@@ -931,13 +940,186 @@ class Game:
         self.generated_npc_chunks = set()  # 记录已生成 NPC 的区块
         self.damage_texts = []
         self.npcs = pygame.sprite.Group()
-        self.current_shop = None
         self.selected_item_index = 0  # 当前选中的物品索引
         self.selected_skill = None  # 当前选中的技能
         self.selected_shop_item = 0  # 当前选中的商店商品索引
         self.in_shop = False  # 是否正在与商店交互
         self.game_over = False
         self.check_chunks()  # 初始化区块生成
+
+    # 生态系统商店配置
+    ECOSYSTEM_SHOPS = {
+        Ecosystem.GRASSLAND: {
+            "items": [
+                (ItemType.POTION, {"potion_red": 0.7, "potion_blue": 0.3}),
+                (ItemType.WEAPON, {WeaponType.SHORTSWORD: 0.6, WeaponType.SPEAR: 0.4}),
+                (ItemType.ARMOR, {"leather": 1.0})
+            ],
+            "color": (0, 255, 0)  # 绿色主题
+        },
+        Ecosystem.DARK_FOREST: {
+            "items": [
+                (ItemType.POTION, {"potion_red": 0.4, "potion_blue": 0.6}),
+                (ItemType.WEAPON, {WeaponType.DAGGER: 0.8, WeaponType.SHORTSWORD: 0.2}),
+                (ItemType.ARMOR, {"chainmail": 1.0})
+            ],
+            "color": (0, 100, 0)  # 深绿主题
+        },
+        Ecosystem.MOUNTAIN: {
+            "items": [
+                (ItemType.POTION, {"potion_red": 0.5, "potion_blue": 0.5}),
+                (ItemType.WEAPON, {WeaponType.GREATSWORD: 0.7, WeaponType.SPEAR: 0.3}),
+                (ItemType.ARMOR, {"plate": 1.0})
+            ],
+            "color": (128, 128, 128)  # 灰色主题
+        },
+        Ecosystem.DESERT_LAVA: {
+            "items": [
+                (ItemType.POTION, {"potion_red": 0.9, "potion_blue": 0.1}),
+                (ItemType.WEAPON, {WeaponType.GREATSWORD: 0.5, WeaponType.SPEAR: 0.5}),
+                (ItemType.ARMOR, {"plate": 0.7, "chainmail": 0.3})
+            ],
+            "color": (255, 69, 0)  # 熔岩主题
+        }
+    }
+
+    def generate_npc_in_chunk(self, chunk_x, chunk_y, ecosystem):
+        """在指定区块生成NPC（5%概率）"""
+        if random.random() > 0.05:  # 95%概率不生成
+            return
+
+        # 获取商店配置
+        shop_config = self.ECOSYSTEM_SHOPS[ecosystem]
+
+        # 随机生成位置（区块内的随机位置）
+        tile_x = chunk_x * CHUNK_SIZE + random.randint(2, CHUNK_SIZE - 3)
+        tile_y = chunk_y * CHUNK_SIZE + random.randint(2, CHUNK_SIZE - 3)
+        npc_pos = (tile_x * TILE_SIZE, tile_y * TILE_SIZE)
+
+        # 生成商店物品
+        shop_items = []
+        for item_type, probabilities in shop_config["items"]:
+            # 随机选择具体物品
+            item_name = random.choices(
+                list(probabilities.keys()),
+                weights=list(probabilities.values())
+            )[0]
+
+            if item_type == ItemType.WEAPON:
+                item = copy.deepcopy(WEAPONS[item_name])
+            elif item_type == ItemType.ARMOR:
+                item = copy.deepcopy(ARMORS[item_name])
+            elif item_type == ItemType.POTION:
+                potion_type = "HP" if "red" in item_name else "MP"
+                item = Equipment(
+                    f"{potion_type} Potion",
+                    ItemType.POTION,
+                    {"hp": 30} if "red" in item_name else {"mp": 20}
+                )
+
+            # 设置合理价格
+            item.value = random.randint(15, 50)
+            shop_items.append(item)
+
+        # 创建NPC，传入生态系统的主题色
+        npc = NPC(npc_pos, shop_items)
+        # 移除覆盖颜色的代码，保留初始化时绘制的图案
+        npc.dialogue = self.get_random_dialogue(ecosystem)
+
+        # 添加到游戏世界
+        self.npcs.add(npc)
+        self.all_sprites.add(npc)
+
+    def find_nearest_npc(self):
+        """找到距离玩家最近的 NPC"""
+        nearest_npc = None
+        min_distance = float('inf')  # 初始化为无穷大
+
+        for npc in self.npcs:
+            # 计算 NPC 与玩家的距离
+            distance = pygame.math.Vector2(npc.rect.center).distance_to(self.player.rect.center)
+            if distance < min_distance:
+                min_distance = distance
+                nearest_npc = npc
+
+        return nearest_npc, min_distance
+
+    def draw_npc_direction(self):
+        """绘制最近 NPC 的方向指引"""
+        nearest_npc, distance = self.find_nearest_npc()
+        if nearest_npc is None:
+            return  # 如果没有 NPC，则不绘制
+
+        # 获取玩家和 NPC 的位置
+        player_pos = pygame.math.Vector2(self.player.rect.center)
+        npc_pos = pygame.math.Vector2(nearest_npc.rect.center)
+
+        # 计算方向向量
+        direction = (npc_pos - player_pos).normalize()
+
+        # 如果 NPC 在屏幕外，绘制箭头
+        if not self.camera.camera.collidepoint(npc_pos):
+            # 计算箭头在屏幕边缘的位置
+            screen_center = pygame.math.Vector2(SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2)
+            edge_point = screen_center + direction * 200  # 200 是箭头距离屏幕中心的距离
+
+            # 绘制箭头
+            arrow_size = 20
+            angle = direction.angle_to(pygame.math.Vector2(1, 0))  # 计算箭头角度
+            arrow_points = [
+                edge_point + pygame.math.Vector2(-arrow_size, -arrow_size).rotate(-angle),
+                edge_point + pygame.math.Vector2(-arrow_size, arrow_size).rotate(-angle),
+                edge_point + pygame.math.Vector2(arrow_size, 0).rotate(-angle)
+            ]
+            pygame.draw.polygon(screen, (255, 255, 0), arrow_points)  # 黄色箭头
+
+        # 显示距离信息
+        font = pygame.font.Font(None, 24)
+        distance_text = font.render(f"Nearest NPC: {int(distance)}px", True, (255, 255, 0))
+        screen.blit(distance_text, (10, SCREEN_HEIGHT - 60))
+
+    def get_random_dialogue(self, ecosystem):
+        """获取符合生态系统的随机对话"""
+        dialogues = {
+            Ecosystem.GRASSLAND: [
+                "草原的風帶來了好買賣！",
+                "新鮮的藥草和武器，來看看吧！"
+            ],
+            Ecosystem.DARK_FOREST: [
+                "迷途的旅人...需要幫助嗎？",
+                "小心森林中的陷阱，買些裝備吧"
+            ],
+            Ecosystem.MOUNTAIN: [
+                "堅固的裝備才能征服高山！",
+                "礦石打造的精品武器，不看看嗎？"
+            ],
+            Ecosystem.DESERT_LAVA: [
+                "炎熱之地必備的生存裝備！",
+                "用火山礦打造的稀有武器！"
+            ]
+        }
+        return random.choice(dialogues[ecosystem])
+
+    def handle_npc_interaction(self):
+        """处理NPC交互"""
+        for npc in self.npcs:
+            if npc.can_interact(self.player.rect.center):
+                # 显示交互提示
+                self.draw_interaction_prompt(npc.rect.top)
+                # 处理按键交互
+                keys = pygame.key.get_pressed()
+                if keys[K_e]:
+                    self.current_shop_npc = npc
+                    self.in_shop = True
+                return
+
+    def draw_interaction_prompt(self, y_pos):
+        """绘制交互提示"""
+        font = pygame.font.Font(None, 28)
+        text = font.render("按 E 交易", True, (255, 255, 0))
+        text_rect = text.get_rect(center=(SCREEN_WIDTH//2, y_pos - 20))
+        pygame.draw.rect(screen, (0, 0, 0, 150), text_rect.inflate(10, 5))
+        screen.blit(text, text_rect)
 
     def check_chunks(self):
         """检查并生成玩家周围的区块"""
@@ -957,60 +1139,104 @@ class Game:
                     # 生成地形
                     self.map.generate_chunk(*current_chunk)
 
+                    # 获取区块的中心坐标
+                    gx = current_chunk[0] * CHUNK_SIZE + CHUNK_SIZE // 2
+                    gy = current_chunk[1] * CHUNK_SIZE + CHUNK_SIZE // 2
+
+                    # 获取区块的主要生态系统
+                    blend = get_ecosystem_blend(gx, gy)
+                    main_ecosystem = max(blend, key=lambda x: x[1])[0]
+
                     # 生成敌人
                     self.generate_enemies_in_chunk(*current_chunk)
 
-                    # 在中心区块生成 NPC
-                    if current_chunk == (0, 0) and current_chunk not in self.generated_npc_chunks:
-                        self.generate_npc_in_chunk(*current_chunk)
-                        self.generated_npc_chunks.add(current_chunk)
+                    # 生成 NPC（5% 概率）
+                    if random.random() < 0.05:  # 5% 概率生成 NPC
+                        self.generate_npc_in_chunk(current_chunk[0], current_chunk[1], main_ecosystem)
 
                     # 标记区块为已生成
                     self.generated_chunks.add(current_chunk)
+    def generate_npc_in_chunk(self, chunk_x, chunk_y, ecosystem):
+        """在指定区块生成NPC（5%概率）"""
+        if random.random() > 0.05:  # 95%概率不生成
+            return
 
-    def generate_npc_in_chunk(self, chunk_x, chunk_y):
-        """在指定区块生成 NPC"""
-        # 计算 NPC 的位置（区块中心）
-        npc_pos = (
-            chunk_x * CHUNK_SIZE * TILE_SIZE + (CHUNK_SIZE // 2) * TILE_SIZE,
-            chunk_y * CHUNK_SIZE * TILE_SIZE + (CHUNK_SIZE // 2) * TILE_SIZE
-        )
+        # 获取商店配置
+        shop_config = self.ECOSYSTEM_SHOPS[ecosystem]
 
-        # 创建 NPC
-        shop_items = [
-            copy.deepcopy(WEAPONS[WeaponType.SHORTSWORD]),
-            copy.deepcopy(ARMORS["leather"]),
-            copy.deepcopy(POTIONS[0]),
-            copy.deepcopy(POTIONS[2])
-        ]
+        # 随机生成位置（区块内的随机位置）
+        tile_x = chunk_x * CHUNK_SIZE + random.randint(2, CHUNK_SIZE - 3)
+        tile_y = chunk_y * CHUNK_SIZE + random.randint(2, CHUNK_SIZE - 3)
+        npc_pos = (tile_x * TILE_SIZE, tile_y * TILE_SIZE)
+
+        # 生成商店物品
+        shop_items = []
+        for item_type, probabilities in shop_config["items"]:
+            # 随机选择具体物品
+            item_name = random.choices(
+                list(probabilities.keys()),
+                weights=list(probabilities.values())
+            )[0]
+
+            if item_type == ItemType.WEAPON:
+                item = copy.deepcopy(WEAPONS[item_name])
+            elif item_type == ItemType.ARMOR:
+                item = copy.deepcopy(ARMORS[item_name])
+            elif item_type == ItemType.POTION:
+                potion_type = "HP" if "red" in item_name else "MP"
+                item = Equipment(
+                    f"{potion_type} Potion",
+                    ItemType.POTION,
+                    {"hp": 30} if "red" in item_name else {"mp": 20}
+                )
+
+            # 设置合理价格
+            item.value = random.randint(15, 50)
+            shop_items.append(item)
+
+        # 创建NPC
         npc = NPC(npc_pos, shop_items)
+        npc.image.fill(shop_config["color"])
+        npc.dialogue = self.get_random_dialogue(ecosystem)
 
-        # 将 NPC 添加到游戏世界中
+        # 添加到游戏世界
         self.npcs.add(npc)
         self.all_sprites.add(npc)
 
     def generate_enemies_in_chunk(self, chunk_x, chunk_y):
-        """在区块中生成敌人"""
+        """在区块中生成敌人和 NPC"""
         start_x = chunk_x * CHUNK_SIZE
         start_y = chunk_y * CHUNK_SIZE
         end_x = start_x + CHUNK_SIZE
         end_y = start_y + CHUNK_SIZE
 
-        num_enemies = random.randint(1, 4)
+        # 获取区块的中心坐标
+        gx = chunk_x * CHUNK_SIZE + CHUNK_SIZE // 2
+        gy = chunk_y * CHUNK_SIZE + CHUNK_SIZE // 2
+
+        # 获取区块的主要生态系统
+        blend = get_ecosystem_blend(gx, gy)
+        main_ecosystem = max(blend, key=lambda x: x[1])[0]
+
+        # 生成 NPC（5% 概率）
+        if random.random() < 0.9:  # 5% 概率生成 NPC
+            self.generate_npc_in_chunk(chunk_x, chunk_y, main_ecosystem)
+
+        # 生成敌人
+        num_enemies = random.randint(1, 4)  # 每个区块生成 1-4 个敌人
         for _ in range(num_enemies):
+            # 随机生成敌人的位置
             tile_x = random.randint(start_x, end_x - 1)
             tile_y = random.randint(start_y, end_y - 1)
-            gx = tile_x + chunk_x * CHUNK_SIZE
-            gy = tile_y + chunk_y * CHUNK_SIZE
-            blend = get_ecosystem_blend(gx, gy)
-            main_ecosystem = max(blend, key=lambda x: x[1])[0]
 
-            # 根据生态系统生成对应类型怪物
+            # 根据生态系统生成对应类型的怪物
             monster_type = self.get_monster_type(main_ecosystem)
             monster = Monster(
                 pos=(tile_x * TILE_SIZE, tile_y * TILE_SIZE),
                 monster_type=monster_type
             )
+
+            # 将敌人添加到游戏世界
             self.enemies.add(monster)
             self.all_sprites.add(monster)
 
@@ -1036,6 +1262,8 @@ class Game:
                 (MonsterType.TROLL, 30)
             ]
         }
+
+        # 根据权重随机选择怪物类型
         total = sum(w for _, w in type_weights[ecosystem])
         r = random.uniform(0, total)
         current = 0
@@ -1043,7 +1271,7 @@ class Game:
             current += w
             if r < current:
                 return t
-        return MonsterType.WOLF
+        return MonsterType.WOLF  # 默认返回狼
 
     def handle_combat(self):
         """处理战斗逻辑"""
@@ -1200,6 +1428,9 @@ class Game:
         if self.in_shop:
             self.draw_shop_ui()
 
+        # 绘制最近 NPC 的方向指引
+        self.draw_npc_direction()
+
     def draw_player_info(self, surface, left_column_rect):
         """绘制玩家信息"""
         font = pygame.font.Font(None, 22)
@@ -1332,12 +1563,10 @@ class Game:
         collisions = pygame.sprite.spritecollide(self.player, self.npcs, False)
         if collisions:
             self.current_shop_npc = collisions[0]
-            self.show_shop_prompt = True
             keys = pygame.key.get_pressed()
             if keys[K_e]:
                 self.in_shop = True
         else:
-            self.show_shop_prompt = False
             self.current_shop_npc = None
 
     def draw_shop_ui(self):
@@ -1345,9 +1574,11 @@ class Game:
         if not self.in_shop or not self.current_shop_npc:
             return
 
-        # 半透明背景
+        # 创建半透明背景
         shop_rect = pygame.Rect(SCREEN_WIDTH // 2 - 250, SCREEN_HEIGHT // 2 - 200, 500, 400)
-        pygame.draw.rect(screen, (30, 30, 30, 200), shop_rect)
+        shop_surface = pygame.Surface((500, 400), pygame.SRCALPHA)
+        shop_surface.fill((30, 30, 30, 200))
+        screen.blit(shop_surface, shop_rect.topleft)
 
         # 绘制商店内容
         font = pygame.font.Font(None, 28)
@@ -1357,7 +1588,6 @@ class Game:
         # 商品列表
         y_pos = shop_rect.y + 60
         for idx, item in enumerate(self.current_shop_npc.shop_items):
-            # 高亮选中的商品
             color = (255, 215, 0) if idx == self.selected_shop_item else (255, 255, 255)
             text = font.render(f"{item.name} - {item.value} Gold", True, color)
             screen.blit(text, (shop_rect.x + 40, y_pos))
@@ -1493,6 +1723,22 @@ class Game:
             # 绘制地图
             self.map.draw(screen, self.camera)
 
+            # 然后按顺序绘制其他实体：
+            # 1. 物品
+            for item in self.items:
+                screen.blit(item.image, self.camera.apply(item))
+
+            # 2. 敌人
+            for enemy in self.enemies:
+                screen.blit(enemy.image, self.camera.apply(enemy))
+
+            # 3. 玩家
+            screen.blit(self.player.image, self.camera.apply(self.player))
+
+            # 4. 最后绘制NPC（确保在最上层）
+            for npc in self.npcs:
+                screen.blit(npc.image, self.camera.apply(npc))
+
             # 处理输入
             keys = pygame.key.get_pressed()
             dx, dy = 0, 0
@@ -1547,4 +1793,3 @@ class Game:
 if __name__ == "__main__":
     game = Game()
     game.run()
-    pygame.quit()
