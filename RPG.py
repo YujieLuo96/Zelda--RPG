@@ -5,6 +5,7 @@ import math
 from pygame.locals import *
 from collections import defaultdict
 import copy
+from perlin_noise import PerlinNoise  # 需要安装 perlin-noise 库
 
 # 颜色定义
 COLORS = {
@@ -19,6 +20,7 @@ COLORS = {
     "sand": (244, 164, 96),  # 沙漠
     "basalt": (75, 75, 75),  # 玄武岩
     "lava": (255, 69, 0),  # 熔岩
+    "water": (30, 144, 255),  # 水
     "player": (0, 0, 255),
     "enemy": (255, 0, 0),
     "item": (255, 255, 0),
@@ -44,41 +46,56 @@ class Ecosystem(Enum):
 
 # 地形类型
 class Terrain(Enum):
-    GRASS = 0  # 草原青草
-    MUD = 1  # 泥土地
+    GRASS = 0       # 草原青草
+    MUD = 1         # 泥土地
     SMALL_TREE = 2  # 小树
     DARK_GRASS = 3  # 深色草丛
-    BIG_TREE = 4  # 大树
-    THORNS = 5  # 荆棘
-    ROCK = 6  # 岩石
-    SANDSTONE = 7  # 砂岩
-    SAND = 8  # 沙漠
-    BASALT = 9  # 玄武岩
-    LAVA = 10  # 熔岩
+    BIG_TREE = 4    # 大树
+    THORNS = 5      # 荆棘
+    ROCK = 6        # 岩石
+    SANDSTONE = 7   # 砂岩
+    SAND = 8        # 沙漠
+    BASALT = 9      # 玄武岩
+    LAVA = 10       # 熔岩
+    WATER = 11      # 新增水地形
+
+# 地形通行性配置
+TERRAIN_PASSABLE = {
+    Terrain.GRASS: True,
+    Terrain.MUD: True,
+    Terrain.SMALL_TREE: True,
+    Terrain.DARK_GRASS: True,
+    Terrain.BIG_TREE: True,
+    Terrain.THORNS: True,
+    Terrain.ROCK: True,
+    Terrain.SANDSTONE: True,
+    Terrain.SAND: True,
+    Terrain.BASALT: True,
+    Terrain.LAVA: False,
+    Terrain.WATER: False
+}
 
 
-# 生态系统地形权重配置
+# 在所有生态系统地形权重
 ECOSYSTEM_TERRAIN_WEIGHTS = {
     Ecosystem.GRASSLAND: [
-        (Terrain.GRASS, 40),
+        (Terrain.GRASS, 60),
         (Terrain.MUD, 30),
-        (Terrain.SMALL_TREE, 20),
-        (Terrain.ROCK, 5),
-        (Terrain.SANDSTONE, 5)
+        (Terrain.SMALL_TREE, 7),
+        (Terrain.ROCK, 3)
     ],
     Ecosystem.DARK_FOREST: [
         (Terrain.DARK_GRASS, 35),
-        (Terrain.BIG_TREE, 40),
-        (Terrain.THORNS, 15),
+        (Terrain.BIG_TREE, 45),
+        (Terrain.THORNS, 6),
         (Terrain.MUD, 5),
-        (Terrain.ROCK, 5)
+        (Terrain.ROCK, 4)
     ],
     Ecosystem.MOUNTAIN: [
         (Terrain.ROCK, 45),
         (Terrain.SANDSTONE, 30),
-        (Terrain.SMALL_TREE, 10),
-        (Terrain.GRASS, 10),
-        (Terrain.MUD, 5)
+        (Terrain.SMALL_TREE, 5),
+        (Terrain.BASALT, 15)
     ],
     Ecosystem.DESERT_LAVA: [
         (Terrain.SAND, 35),
@@ -211,19 +228,153 @@ class Camera:
 
 class GameMap:
     def __init__(self):
-        self.terrain_map = {}
-        self.chunk_size = CHUNK_SIZE
+        self.terrain_map = {}  # 存储地形数据
+        self.chunk_size = CHUNK_SIZE  # 区块大小
+        self.river_network = set()  # 河流坐标
+        self.lake_areas = set()  # 湖泊坐标
+        self.generated_chunks = set()  # 记录已生成的区块
+        self.generate_water_systems()  # 生成完整水系
 
-    def get_terrain(self, x, y):
-        chunk_x = x // self.chunk_size
-        chunk_y = y // self.chunk_size
-        if (chunk_x, chunk_y) not in self.terrain_map:
-            self.generate_chunk(chunk_x, chunk_y)
-        local_x = x % self.chunk_size
-        local_y = y % self.chunk_size
-        return self.terrain_map[(chunk_x, chunk_y)][local_y][local_x]
+    def generate_water_systems(self):
+        """生成完整的水系（河流+湖泊）"""
+        # 生成主河流
+        for _ in range(random.randint(5, 9)):
+            self.generate_main_river()
+
+        # 生成支流系统
+        self.generate_tributaries()
+
+        # 生成随机湖泊
+        self.generate_random_lakes(7, 11)
+
+        # 验证水系完整性
+        self.validate_water_integrity()
+
+    def generate_main_river(self):
+        """生成主河道核心逻辑"""
+        noise = PerlinNoise(octaves=3, seed=random.randint(0, 100))
+        is_horizontal = random.random() < 0.6
+        start = random.randint(200, 1000)
+        curve_scale = 60.0
+        max_offset = 40
+        base_width = 5
+
+        for pos in range(-800, 2000):
+            noise_value = noise([pos / curve_scale])
+            offset = int(noise_value * max_offset)
+            width = base_width + int(abs(noise_value) * 3)
+
+            if is_horizontal:
+                x = pos
+                y = start + offset
+                self.add_river_segment(x, y, width, is_horizontal)
+            else:
+                x = start + offset
+                y = pos
+                self.add_river_segment(x, y, width, is_horizontal)
+
+    def add_river_segment(self, x, y, width, is_horizontal):
+        """添加河流片段"""
+        if is_horizontal:
+            for dy in range(-width // 2, width // 2 + 1):
+                self.river_network.add((x, y + dy))
+        else:
+            for dx in range(-width // 2, width // 2 + 1):
+                self.river_network.add((x + dx, y))
+
+    def generate_tributaries(self):
+        """生成支流系统"""
+        main_rivers = list(self.river_network)
+        for _ in range(len(main_rivers) // 10):  # 每10个主河道点生成一个支流
+            x, y = random.choice(main_rivers)
+            self.generate_single_tributary(x, y)
+
+    def generate_single_tributary(self, x, y):
+        """生成单个支流"""
+        length = random.randint(10, 25)
+        width = random.randint(3, 5)
+        direction = random.choice(["n", "s", "e", "w"])
+
+        for i in range(length):
+            dx, dy = 0, 0
+            if direction == "n":
+                dy = -i
+            elif direction == "s":
+                dy = i
+            elif direction == "e":
+                dx = i
+            else:
+                dx = -i
+
+            for w in range(-width // 2, width // 2 + 1):
+                if direction in ["n", "s"]:
+                    self.river_network.add((x + w + dx, y + dy))
+                else:
+                    self.river_network.add((x + dx, y + w + dy))
+
+            if i % 4 == 0:
+                width = max(2, width - 1)
+
+    def generate_random_lakes(self, min_count, max_count):
+        """生成随机分布的湖泊"""
+        for _ in range(random.randint(min_count, max_count)):
+            x = random.randint(100, 1900)
+            y = random.randint(100, 1900)
+            radius = random.randint(6, 12)
+            self.create_lake(x, y, radius)
+
+    def create_lake(self, x, y, radius):
+        """创建圆形湖泊"""
+        for dx in range(-radius, radius + 1):
+            for dy in range(-radius, radius + 1):
+                if math.sqrt(dx ** 2 + dy ** 2) <= radius:
+                    self.lake_areas.add((x + dx, y + dy))
+
+    def validate_water_integrity(self):
+        """验证水系完整性"""
+        all_water = self.river_network.union(self.lake_areas)
+        visited = set()
+
+        for water_point in all_water:
+            if water_point not in visited:
+                cluster = self.find_water_cluster(water_point, all_water)
+                if len(cluster) < 5:
+                    self.convert_to_marsh(cluster)
+                visited.update(cluster)
+
+    def find_water_cluster(self, start, all_water):
+        """洪水填充找水簇"""
+        cluster = set()
+        queue = [start]
+        while queue:
+            x, y = queue.pop()
+            if (x, y) in all_water and (x, y) not in cluster:
+                cluster.add((x, y))
+                queue.extend([(x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)])
+        return cluster
+
+    def convert_to_marsh(self, cluster):
+        """将孤立水转换为沼泽"""
+        for x, y in cluster:
+            self.river_network.discard((x, y))
+            self.lake_areas.discard((x, y))
+            # 更新对应区块
+            chunk_x = x // self.chunk_size
+            chunk_y = y // self.chunk_size
+            if (chunk_x, chunk_y) in self.terrain_map:
+                local_x = x % self.chunk_size
+                local_y = y % self.chunk_size
+                self.terrain_map[(chunk_x, chunk_y)][local_y][local_x] = Terrain.MUD
 
     def generate_chunk(self, chunk_x, chunk_y):
+        """生成地图区块"""
+        chunk = self.generate_base_terrain(chunk_x, chunk_y)
+        self.apply_water(chunk, chunk_x, chunk_y)
+        self.post_process_water(chunk)
+        self.terrain_map[(chunk_x, chunk_y)] = chunk
+
+    def generate_base_terrain(self, chunk_x, chunk_y):
+        """生成基础地形（无水）"""
         chunk = []
         for local_y in range(self.chunk_size):
             row = []
@@ -235,9 +386,50 @@ class GameMap:
                 terrain = choose_terrain(combined)
                 row.append(terrain)
             chunk.append(row)
-        self.terrain_map[(chunk_x, chunk_y)] = chunk
+        return chunk
+
+    def apply_water(self, chunk, chunk_x, chunk_y):
+        """应用水系到区块"""
+        chunk_start_x = chunk_x * self.chunk_size
+        chunk_start_y = chunk_y * self.chunk_size
+
+        for y in range(self.chunk_size):
+            for x in range(self.chunk_size):
+                global_x = chunk_start_x + x
+                global_y = chunk_start_y + y
+                if (global_x, global_y) in self.river_network:
+                    chunk[y][x] = Terrain.WATER
+                elif (global_x, global_y) in self.lake_areas:
+                    chunk[y][x] = Terrain.WATER
+
+    def post_process_water(self, chunk):
+        """水地形后处理"""
+        for y in range(self.chunk_size):
+            for x in range(self.chunk_size):
+                if chunk[y][x] == Terrain.WATER:
+                    neighbors = 0
+                    for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                        if 0 <= x + dx < self.chunk_size and 0 <= y + dy < self.chunk_size:
+                            if chunk[y + dy][x + dx] == Terrain.WATER:
+                                neighbors += 1
+                    if neighbors < 2:
+                        chunk[y][x] = Terrain.MUD
+
+    def is_passable(self, x, y):
+        terrain = self.get_terrain(x, y)
+        return TERRAIN_PASSABLE.get(terrain, True)
+
+    def get_terrain(self, x, y):
+        chunk_x = x // self.chunk_size
+        chunk_y = y // self.chunk_size
+        if (chunk_x, chunk_y) not in self.terrain_map:
+            self.generate_chunk(chunk_x, chunk_y)
+        local_x = x % self.chunk_size
+        local_y = y % self.chunk_size
+        return self.terrain_map[(chunk_x, chunk_y)][local_y][local_x]
 
     def draw(self, surface, camera):
+        """绘制地图"""
         cam_left = -camera.camera.x
         cam_top = -camera.camera.y
         cam_right = cam_left + SCREEN_WIDTH
@@ -274,6 +466,8 @@ class GameMap:
                     color = COLORS["basalt"]
                 elif terrain == Terrain.LAVA:
                     color = COLORS["lava"]
+                elif terrain == Terrain.WATER:
+                    color = COLORS["water"]
 
                 rect = pygame.Rect(x * TILE_SIZE, y * TILE_SIZE, TILE_SIZE, TILE_SIZE)
                 screen_rect = camera.apply_rect(rect)
@@ -797,18 +991,24 @@ class Player(pygame.sprite.Sprite):
         """获取当前有效属性（包含装备加成）"""
         return self.stats
 
-    def move(self, dx, dy):
-        """移动玩家"""
-        self.rect.x += dx * PLAYER_SPEED
-        self.rect.y += dy * PLAYER_SPEED
+    def move(self, dx, dy, game_map):
+        """移动玩家（新增碰撞检测）"""
+        new_x = self.rect.x + dx * PLAYER_SPEED
+        new_y = self.rect.y + dy * PLAYER_SPEED
 
-    def use_item(self, item):
-        """使用物品"""
-        if item.type == ItemType.POTION:
-            for stat, value in item.stats.items():
-                self.stats[stat] = min(self.stats[f"max_{stat}"], self.stats[stat] + value)
-            return True
-        return False
+        # 转换坐标到地图格子
+        tile_x = new_x // TILE_SIZE
+        tile_y = new_y // TILE_SIZE
+
+        if game_map.is_passable(tile_x, tile_y):
+            self.rect.x = new_x
+            self.rect.y = new_y
+        else:
+            # 尝试分别检测X和Y方向的碰撞
+            if game_map.is_passable(tile_x, self.rect.y // TILE_SIZE):
+                self.rect.x = new_x
+            elif game_map.is_passable(self.rect.x // TILE_SIZE, tile_y):
+                self.rect.y = new_y
 
     def add_to_inventory(self, item):
         """添加物品到背包"""
@@ -1746,7 +1946,7 @@ class Game:
             if keys[K_d]: dx = 1
             if keys[K_w]: dy = -1
             if keys[K_s]: dy = 1
-            self.player.move(dx, dy)
+            self.player.move(dx, dy, self.map)
 
             # 更新游戏状态
             self.check_chunks()
