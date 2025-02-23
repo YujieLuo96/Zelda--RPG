@@ -247,218 +247,125 @@ class GameMap:
         self.river_network = set()  # 河流坐标
         self.lake_areas = set()  # 湖泊坐标
         self.generated_chunks = set()  # 记录已生成的区块
-        self.generate_water_systems()  # 生成完整水系
+
+        # 噪声生成器
+        self.base_noise = PerlinNoise(octaves=2, seed=1)  # 基础低频噪声
+        self.detail_noise = PerlinNoise(octaves=4, seed=3)  # 高频细节噪声
+        self.height_scale = 128.0  # 增大采样范围
+        self.detail_scale = 32.0  # 细节噪声采样范围
+        self.detail_strength = 0.3  # 细节噪声强度
+        self.mountain_threshold = 0.35  # 山地阈值
+
+    def get_height(self, x, y):
+        """获取平滑的高度值（0-1）"""
+        # 基础低频噪声（大范围变化）
+        base = self.base_noise([x / self.height_scale, y / self.height_scale])
+
+        # 高频细节噪声（小范围变化）
+        detail = self.detail_noise([x / self.detail_scale, y / self.detail_scale])
+
+        # 混合噪声（细节噪声影响较小）
+        height = base + detail * self.detail_strength
+
+        # 使用smoothstep函数柔化过渡
+        height = self.smoothstep(height)
+
+        # 归一化到0-1范围
+        return height
+
+    def smoothstep(self, value):
+        """S曲线过渡函数"""
+        value = max(0, min(1, (value + 1) / 2))  # 先归一化到0-1
+        return value * value * (3 - 2 * value)
+
+    def smooth_transition(self, value, start, end):
+        """平滑过渡计算"""
+        t = (value - start) / (end - start)
+        t = max(0, min(1, t))
+        return t * t * (3 - 2 * t)  # 三次平滑曲线
+
+    def get_mid_terrain(self, gx, gy):
+        """获取中间地带地形（复用原逻辑）"""
+        blend = get_ecosystem_blend(gx, gy)
+        combined = get_combined_weights(blend)
+        return choose_terrain(combined)
 
     def generate_base_terrain(self, chunk_x, chunk_y):
-        """生成基础地形（包含山丘生成逻辑）"""
+        """生成基础地形（优化高度过渡）"""
         chunk = []
-        noise_scale = 24.0  # 控制山丘规模
-        hill_noise = PerlinNoise(octaves=4, seed=42)  # 固定种子保证区块间连贯
-
         for local_y in range(self.chunk_size):
             row = []
             for local_x in range(self.chunk_size):
                 gx = chunk_x * self.chunk_size + local_x
                 gy = chunk_y * self.chunk_size + local_y
 
-                # 获取生态混合信息
-                blend = get_ecosystem_blend(gx, gy)
-                main_ecosystem = max(blend, key=lambda x: x[1])[0]
+                # 获取平滑后的高度值
+                height = self.get_height(gx, gy)
 
-                # 判断是否在山丘生成区域
-                is_hill_zone = main_ecosystem in (Ecosystem.MOUNTAIN, Ecosystem.DESERT_LAVA)
-                hill_value = hill_noise([gx / noise_scale, gy / noise_scale])
-
-                if is_hill_zone and hill_value > 0.2:  # 山丘区域
-                    # 山丘地形权重
-                    hill_weights = [
-                        (Terrain.ROCK, 50),
-                        (Terrain.SANDSTONE, 30),
-                        (Terrain.BASALT, 20)
-                    ] if main_ecosystem == Ecosystem.MOUNTAIN else [
-                        (Terrain.BASALT, 60),
-                        (Terrain.SANDSTONE, 30),
-                        (Terrain.ROCK, 10)
-                    ]
-                    terrain = choose_terrain(hill_weights)
-                else:  # 常规地形生成
+                # 优化后的地形过渡逻辑
+                if height < 0.35:
+                    # 水域渐变过渡
+                    if height <0.32:
+                        terrain = Terrain.WATER
+                    else:
+                        terrain = random.choices(
+                        [Terrain.WATER, Terrain.MUD],
+                        weights=[30, 70]
+                    )[0]
+                elif height > 0.65:
+                    # 山地渐变过渡
+                    mountain_weight = self.smooth_transition(height, 0.65, 0.7)
+                    terrain = random.choices(
+                        [Terrain.ROCK, self.get_mid_terrain(gx, gy)],
+                        weights=[mountain_weight * 100, (1 - mountain_weight) * 100]
+                    )[0]
+                else:
+                    # 中间地带使用原逻辑
+                    blend = get_ecosystem_blend(gx, gy)
                     combined = get_combined_weights(blend)
                     terrain = choose_terrain(combined)
 
                 row.append(terrain)
             chunk.append(row)
+        return self.post_process_chunk(chunk)
 
-        # 应用细胞自动机平滑山丘
-        if is_hill_zone:
-            chunk = self.apply_cellular_automaton(chunk, iterations=3)
+    def post_process_chunk(self, chunk):
+        """区块后处理"""
+        # 使用细胞自动机平滑水域和山地
+        for _ in range(2):
+            chunk = self.apply_cellular_automaton(chunk,
+                                                  targets=[Terrain.WATER, Terrain.MUD],
+                                                  replace=Terrain.MUD,
+                                                  min_neighbors=3
+                                                  )
+            chunk = self.apply_cellular_automaton(chunk,
+                                                  targets=[Terrain.ROCK, Terrain.BASALT],
+                                                  replace=Terrain.SANDSTONE,
+                                                  min_neighbors=4
+                                                  )
         return chunk
 
-    def apply_cellular_automaton(self, chunk, iterations=3):
-        """细胞自动机平滑算法"""
-        rock_types = {Terrain.ROCK, Terrain.SANDSTONE, Terrain.BASALT}
-
+    def apply_cellular_automaton(self, chunk, targets, replace, min_neighbors, iterations=2):
+        """通用细胞自动机处理"""
         for _ in range(iterations):
             new_chunk = [row.copy() for row in chunk]
             for y in range(1, self.chunk_size - 1):
                 for x in range(1, self.chunk_size - 1):
-                    # 统计周围岩石类地形数量
-                    neighbors = sum(
-                        1 for dy in (-1, 0, 1)
-                        for dx in (-1, 0, 1)
-                        if chunk[y + dy][x + dx] in rock_types
-                    )
+                    if chunk[y][x] not in targets:
+                        continue
 
-                    current = chunk[y][x]
-                    if current in rock_types:
-                        # 孤立点规则：周围少于3个同类则消失
-                        if neighbors < 3:
-                            new_chunk[y][x] = self.get_surrounding_terrain(chunk, x, y)
-                    else:
-                        # 聚集规则：周围超过5个同类则转化
-                        if neighbors > 5:
-                            new_chunk[y][x] = random.choice(list(rock_types))
+                    neighbors = 0
+                    for dy in (-1, 0, 1):
+                        for dx in (-1, 0, 1):
+                            if dx == 0 and dy == 0:
+                                continue
+                            if chunk[y + dy][x + dx] in targets:
+                                neighbors += 1
+
+                    if neighbors < min_neighbors:
+                        new_chunk[y][x] = replace
             chunk = new_chunk
         return chunk
-
-    def get_surrounding_terrain(self, chunk, x, y):
-        """获取周围主要地形"""
-        counts = defaultdict(int)
-        for dy in (-1, 0, 1):
-            for dx in (-1, 0, 1):
-                t = chunk[y + dy][x + dx]
-                counts[t] += 1
-        return max(counts, key=counts.get)
-
-    def generate_water_systems(self):
-        """生成完整的水系（河流+湖泊）"""
-        # 生成主河流
-        for _ in range(random.randint(5, 9)):
-            self.generate_main_river()
-
-        # 生成支流系统
-        self.generate_tributaries()
-
-        # 生成随机湖泊
-        self.generate_random_lakes(7, 11)
-
-        # 验证水系完整性
-        self.validate_water_integrity()
-
-    def generate_main_river(self):
-        """生成主河道核心逻辑"""
-        noise = PerlinNoise(octaves=3, seed=random.randint(0, 100))
-        is_horizontal = random.random() < 0.6
-        start = random.randint(200, 1000)
-        curve_scale = 60.0
-        max_offset = 40
-        base_width = 5
-
-        for pos in range(-800, 2000):
-            noise_value = noise([pos / curve_scale])
-            offset = int(noise_value * max_offset)
-            width = base_width + int(abs(noise_value) * 3)
-
-            if is_horizontal:
-                x = pos
-                y = start + offset
-                self.add_river_segment(x, y, width, is_horizontal)
-            else:
-                x = start + offset
-                y = pos
-                self.add_river_segment(x, y, width, is_horizontal)
-
-    def add_river_segment(self, x, y, width, is_horizontal):
-        """添加河流片段"""
-        if is_horizontal:
-            for dy in range(-width // 2, width // 2 + 1):
-                self.river_network.add((x, y + dy))
-        else:
-            for dx in range(-width // 2, width // 2 + 1):
-                self.river_network.add((x + dx, y))
-
-    def generate_tributaries(self):
-        """生成支流系统"""
-        main_rivers = list(self.river_network)
-        for _ in range(len(main_rivers) // 10):  # 每10个主河道点生成一个支流
-            x, y = random.choice(main_rivers)
-            self.generate_single_tributary(x, y)
-
-    def generate_single_tributary(self, x, y):
-        """生成单个支流"""
-        length = random.randint(10, 25)
-        width = random.randint(3, 5)
-        direction = random.choice(["n", "s", "e", "w"])
-
-        for i in range(length):
-            dx, dy = 0, 0
-            if direction == "n":
-                dy = -i
-            elif direction == "s":
-                dy = i
-            elif direction == "e":
-                dx = i
-            else:
-                dx = -i
-
-            for w in range(-width // 2, width // 2 + 1):
-                if direction in ["n", "s"]:
-                    self.river_network.add((x + w + dx, y + dy))
-                else:
-                    self.river_network.add((x + dx, y + w + dy))
-
-            if i % 4 == 0:
-                width = max(2, width - 1)
-
-    def generate_random_lakes(self, min_count, max_count):
-        """生成随机分布的湖泊"""
-        for _ in range(random.randint(min_count, max_count)):
-            x = random.randint(100, 1900)
-            y = random.randint(100, 1900)
-            radius = random.randint(6, 12)
-            self.create_lake(x, y, radius)
-
-    def create_lake(self, x, y, radius):
-        """创建圆形湖泊"""
-        for dx in range(-radius, radius + 1):
-            for dy in range(-radius, radius + 1):
-                if math.sqrt(dx ** 2 + dy ** 2) <= radius:
-                    self.lake_areas.add((x + dx, y + dy))
-
-    def validate_water_integrity(self):
-        """验证水系完整性"""
-        all_water = self.river_network.union(self.lake_areas)
-        visited = set()
-
-        for water_point in all_water:
-            if water_point not in visited:
-                cluster = self.find_water_cluster(water_point, all_water)
-                if len(cluster) < 5:
-                    self.convert_to_marsh(cluster)
-                visited.update(cluster)
-
-    def find_water_cluster(self, start, all_water):
-        """洪水填充找水簇"""
-        cluster = set()
-        queue = [start]
-        while queue:
-            x, y = queue.pop()
-            if (x, y) in all_water and (x, y) not in cluster:
-                cluster.add((x, y))
-                queue.extend([(x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)])
-        return cluster
-
-    def convert_to_marsh(self, cluster):
-        """将孤立水转换为沼泽"""
-        for x, y in cluster:
-            self.river_network.discard((x, y))
-            self.lake_areas.discard((x, y))
-            # 更新对应区块
-            chunk_x = x // self.chunk_size
-            chunk_y = y // self.chunk_size
-            if (chunk_x, chunk_y) in self.terrain_map:
-                local_x = x % self.chunk_size
-                local_y = y % self.chunk_size
-                self.terrain_map[(chunk_x, chunk_y)][local_y][local_x] = Terrain.MUD
 
     def generate_chunk(self, chunk_x, chunk_y):
         """生成地图区块"""
@@ -466,21 +373,6 @@ class GameMap:
         self.apply_water(chunk, chunk_x, chunk_y)
         self.post_process_water(chunk)
         self.terrain_map[(chunk_x, chunk_y)] = chunk
-
-    def generate_base_terrain(self, chunk_x, chunk_y):
-        """生成基础地形（无水）"""
-        chunk = []
-        for local_y in range(self.chunk_size):
-            row = []
-            for local_x in range(self.chunk_size):
-                gx = chunk_x * self.chunk_size + local_x
-                gy = chunk_y * self.chunk_size + local_y
-                blend = get_ecosystem_blend(gx, gy)
-                combined = get_combined_weights(blend)
-                terrain = choose_terrain(combined)
-                row.append(terrain)
-            chunk.append(row)
-        return chunk
 
     def apply_water(self, chunk, chunk_x, chunk_y):
         """应用水系到区块"""
@@ -566,7 +458,6 @@ class GameMap:
                 rect = pygame.Rect(x * TILE_SIZE, y * TILE_SIZE, TILE_SIZE, TILE_SIZE)
                 screen_rect = camera.apply_rect(rect)
                 pygame.draw.rect(surface, color, screen_rect)
-
 # 技能系统 --------------------------------------------------
 class Skill:
     def __init__(self, name, skill_type, cost, effect, cooldown=0, range=1, target_type="single", description=""):
