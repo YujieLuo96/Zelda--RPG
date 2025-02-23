@@ -14,7 +14,7 @@ COLORS = {
     "small_tree": (0, 100, 0),  # 小树
     "dark_grass": (16, 56, 16),  # 深色草丛
     "big_tree": (0, 50, 0),  # 大树
-    "thorns": (139, 0, 0),  # 荆棘
+    "thorns": (139, 139, 0),  # 荆棘
     "rock": (128, 128, 128),  # 岩石
     "sandstone": (210, 180, 140),  # 砂岩
     "sand": (244, 164, 96),  # 沙漠
@@ -71,43 +71,36 @@ TERRAIN_PASSABLE = {
     Terrain.SANDSTONE: True,
     Terrain.SAND: True,
     Terrain.BASALT: True,
-    Terrain.LAVA: False,
-    Terrain.WATER: False
+    Terrain.LAVA: True,
+    Terrain.WATER: True
 }
 
 
 # 在所有生态系统地形权重
 ECOSYSTEM_TERRAIN_WEIGHTS = {
     Ecosystem.GRASSLAND: [
-        (Terrain.GRASS, 60),
-        (Terrain.MUD, 30),
-        (Terrain.SMALL_TREE, 7),
-        (Terrain.ROCK, 3)
+        (Terrain.GRASS, 70),
+        (Terrain.MUD, 25),
+        (Terrain.SMALL_TREE, 5)
     ],
     Ecosystem.DARK_FOREST: [
-        (Terrain.DARK_GRASS, 35),
-        (Terrain.BIG_TREE, 45),
-        (Terrain.THORNS, 6),
-        (Terrain.MUD, 5),
-        (Terrain.ROCK, 4)
+        (Terrain.DARK_GRASS, 40),
+        (Terrain.BIG_TREE, 55),
+        (Terrain.THORNS, 5)
     ],
-    Ecosystem.MOUNTAIN: [
-        (Terrain.ROCK, 45),
-        (Terrain.SANDSTONE, 30),
+    Ecosystem.MOUNTAIN: [  # 主要地形由山丘生成算法控制
         (Terrain.SMALL_TREE, 5),
-        (Terrain.BASALT, 15)
+        (Terrain.ROCK, 95)
     ],
     Ecosystem.DESERT_LAVA: [
-        (Terrain.SAND, 35),
-        (Terrain.LAVA, 25),
-        (Terrain.BASALT, 20),
-        (Terrain.SANDSTONE, 15),
-        (Terrain.ROCK, 5)
+        (Terrain.SAND, 40),
+        (Terrain.LAVA, 30),
+        (Terrain.BASALT, 30)
     ]
 }
 
 # 游戏配置
-TILE_SIZE = 32
+TILE_SIZE = 8
 PLAYER_SPEED = 5
 SCREEN_WIDTH, SCREEN_HEIGHT = 2400, 1200
 CHUNK_SIZE = 16  # 每个区块包含16x16的瓷砖
@@ -159,26 +152,47 @@ def get_ecosystem_value(gx, gy):
 
 
 def get_ecosystem_blend(gx, gy):
-    """获取生态系统的混合权重"""
-    value = get_ecosystem_value(gx, gy)
-    value = max(0.0, min(1.0, value))
+    """获取生态系统的混合权重（增加山地区域连贯性）
 
+    参数:
+        gx (int): 全局X坐标
+        gy (int): 全局Y坐标
+
+    返回:
+        list: 包含生态系统和对应权重的列表
+    """
+    # 使用Perlin噪声生成基础生态系统值
+    value = (math.sin(gx * 0.01) + math.sin(gy * 0.01) +
+             math.sin((gx + gy) * 0.05) * 0.5 +
+             math.sin(gx * 0.02) * 0.5 +
+             math.cos(gy * 0.03) * 0.5)
+    value = (value + 4) / 8  # 归一化到0-1之间
+    value = max(0.0, min(1.0, value))  # 确保值在0-1之间
+
+    # 根据value值确定生态系统混合权重
     if value < 0.25:
+        # 草原区域
         return [(Ecosystem.GRASSLAND, 1.0)]
     elif value < 0.35:
+        # 草原到黑森林的过渡
         weight = (0.35 - value) / 0.1
         return [(Ecosystem.GRASSLAND, weight), (Ecosystem.DARK_FOREST, 1 - weight)]
     elif value < 0.55:
+        # 黑森林区域
         return [(Ecosystem.DARK_FOREST, 1.0)]
     elif value < 0.65:
+        # 黑森林到山地的过渡
         weight = (0.65 - value) / 0.1
         return [(Ecosystem.DARK_FOREST, weight), (Ecosystem.MOUNTAIN, 1 - weight)]
     elif value < 0.75:
-        return [(Ecosystem.MOUNTAIN, 1.0)]
-    elif value < 0.85:
-        weight = (0.85 - value) / 0.1
+        # 山地到熔岩地的过渡（新增）
+        weight = (0.75 - value) / 0.1
         return [(Ecosystem.MOUNTAIN, weight), (Ecosystem.DESERT_LAVA, 1 - weight)]
+    elif value < 0.85:
+        # 熔岩地区域
+        return [(Ecosystem.DESERT_LAVA, 1.0)]
     else:
+        # 极端熔岩地区域（新增）
         return [(Ecosystem.DESERT_LAVA, 1.0)]
 
 
@@ -234,6 +248,86 @@ class GameMap:
         self.lake_areas = set()  # 湖泊坐标
         self.generated_chunks = set()  # 记录已生成的区块
         self.generate_water_systems()  # 生成完整水系
+
+    def generate_base_terrain(self, chunk_x, chunk_y):
+        """生成基础地形（包含山丘生成逻辑）"""
+        chunk = []
+        noise_scale = 24.0  # 控制山丘规模
+        hill_noise = PerlinNoise(octaves=4, seed=42)  # 固定种子保证区块间连贯
+
+        for local_y in range(self.chunk_size):
+            row = []
+            for local_x in range(self.chunk_size):
+                gx = chunk_x * self.chunk_size + local_x
+                gy = chunk_y * self.chunk_size + local_y
+
+                # 获取生态混合信息
+                blend = get_ecosystem_blend(gx, gy)
+                main_ecosystem = max(blend, key=lambda x: x[1])[0]
+
+                # 判断是否在山丘生成区域
+                is_hill_zone = main_ecosystem in (Ecosystem.MOUNTAIN, Ecosystem.DESERT_LAVA)
+                hill_value = hill_noise([gx / noise_scale, gy / noise_scale])
+
+                if is_hill_zone and hill_value > 0.2:  # 山丘区域
+                    # 山丘地形权重
+                    hill_weights = [
+                        (Terrain.ROCK, 50),
+                        (Terrain.SANDSTONE, 30),
+                        (Terrain.BASALT, 20)
+                    ] if main_ecosystem == Ecosystem.MOUNTAIN else [
+                        (Terrain.BASALT, 60),
+                        (Terrain.SANDSTONE, 30),
+                        (Terrain.ROCK, 10)
+                    ]
+                    terrain = choose_terrain(hill_weights)
+                else:  # 常规地形生成
+                    combined = get_combined_weights(blend)
+                    terrain = choose_terrain(combined)
+
+                row.append(terrain)
+            chunk.append(row)
+
+        # 应用细胞自动机平滑山丘
+        if is_hill_zone:
+            chunk = self.apply_cellular_automaton(chunk, iterations=3)
+        return chunk
+
+    def apply_cellular_automaton(self, chunk, iterations=3):
+        """细胞自动机平滑算法"""
+        rock_types = {Terrain.ROCK, Terrain.SANDSTONE, Terrain.BASALT}
+
+        for _ in range(iterations):
+            new_chunk = [row.copy() for row in chunk]
+            for y in range(1, self.chunk_size - 1):
+                for x in range(1, self.chunk_size - 1):
+                    # 统计周围岩石类地形数量
+                    neighbors = sum(
+                        1 for dy in (-1, 0, 1)
+                        for dx in (-1, 0, 1)
+                        if chunk[y + dy][x + dx] in rock_types
+                    )
+
+                    current = chunk[y][x]
+                    if current in rock_types:
+                        # 孤立点规则：周围少于3个同类则消失
+                        if neighbors < 3:
+                            new_chunk[y][x] = self.get_surrounding_terrain(chunk, x, y)
+                    else:
+                        # 聚集规则：周围超过5个同类则转化
+                        if neighbors > 5:
+                            new_chunk[y][x] = random.choice(list(rock_types))
+            chunk = new_chunk
+        return chunk
+
+    def get_surrounding_terrain(self, chunk, x, y):
+        """获取周围主要地形"""
+        counts = defaultdict(int)
+        for dy in (-1, 0, 1):
+            for dx in (-1, 0, 1):
+                t = chunk[y + dy][x + dx]
+                counts[t] += 1
+        return max(counts, key=counts.get)
 
     def generate_water_systems(self):
         """生成完整的水系（河流+湖泊）"""
