@@ -43,6 +43,19 @@ class Ecosystem(Enum):
     MOUNTAIN = 3  # 山岭地带
     DESERT_LAVA = 4  # 沙漠熔岩地
 
+# 生态系统生成参数
+ECOSYSTEM_OCTAVES = 4      # 噪声的octave数
+ECOSYSTEM_SCALE = 200.0    # 控制生态系统的规模
+MOUNTAIN_HEIGHT_THRESHOLD = 0.7  # 熔岩生态系统最小高度阈值
+ECOSYSTEM_SEED = 12345     # 生态系统噪声种子
+
+# 生态系统类型对应的噪声阈值范围
+ECOSYSTEM_THRESHOLDS = {
+    Ecosystem.GRASSLAND: (-0.8, -0.2),  # 草原泥土地
+    Ecosystem.DARK_FOREST: (-0.2, 0.3), # 黑森林
+    Ecosystem.MOUNTAIN: (0.3, 0.6),     # 山岭地带
+    Ecosystem.DESERT_LAVA: (0.6, 1.0)   # 沙漠熔岩地
+}
 
 # 地形类型
 class Terrain(Enum):
@@ -88,22 +101,21 @@ ECOSYSTEM_TERRAIN_WEIGHTS = {
         (Terrain.BIG_TREE, 55),
         (Terrain.THORNS, 5)
     ],
-    Ecosystem.MOUNTAIN: [  # 主要地形由山丘生成算法控制
-        (Terrain.SMALL_TREE, 5),
-        (Terrain.ROCK, 95)
+    Ecosystem.MOUNTAIN: [
+        (Terrain.ROCK, 85),
+        (Terrain.SANDSTONE, 15)
     ],
     Ecosystem.DESERT_LAVA: [
-        (Terrain.SAND, 40),
-        (Terrain.LAVA, 30),
-        (Terrain.BASALT, 30)
+        (Terrain.SAND, 60),
+        (Terrain.LAVA, 40)
     ]
 }
 
 # 游戏配置
-TILE_SIZE = 8
+TILE_SIZE = 2
 PLAYER_SPEED = 5
 SCREEN_WIDTH, SCREEN_HEIGHT = 2400, 1200
-CHUNK_SIZE = 16  # 每个区块包含16x16的瓷砖
+CHUNK_SIZE = 32  # 每个区块包含16x16的瓷砖
 
 # 初始化Pygame
 pygame.init()
@@ -248,13 +260,23 @@ class GameMap:
         self.lake_areas = set()  # 湖泊坐标
         self.generated_chunks = set()  # 记录已生成的区块
 
-        # 噪声生成器
-        self.base_noise = PerlinNoise(octaves=2, seed=1)  # 基础低频噪声
-        self.detail_noise = PerlinNoise(octaves=4, seed=3)  # 高频细节噪声
-        self.height_scale = 128.0  # 增大采样范围
-        self.detail_scale = 32.0  # 细节噪声采样范围
+        # 初始化随机种子
+        self.seed = random.randint(0, 999999)
+        detail_seed = 7 * self.seed % 117
+
+        # 地形高度噪声生成器（使用随机种子）
+        self.base_noise = PerlinNoise(octaves=2, seed=self.seed)
+        self.detail_noise = PerlinNoise(octaves=4, seed=detail_seed)  # 不同种子
+        self.height_scale = 256.0  # 增大采样范围
+        self.detail_scale = 64.0  # 细节噪声采样范围
         self.detail_strength = 0.3  # 细节噪声强度
         self.mountain_threshold = 0.35  # 山地阈值
+
+        # 独立生态系统噪声生成器
+        self.ecosystem_noise = PerlinNoise(
+            octaves=ECOSYSTEM_OCTAVES,
+            seed=self.seed + 2  # 使用独立随机种子
+        )
 
     def get_height(self, x, y):
         """获取平滑的高度值（0-1）"""
@@ -284,14 +306,26 @@ class GameMap:
         t = max(0, min(1, t))
         return t * t * (3 - 2 * t)  # 三次平滑曲线
 
-    def get_mid_terrain(self, gx, gy):
-        """获取中间地带地形（复用原逻辑）"""
-        blend = get_ecosystem_blend(gx, gy)
-        combined = get_combined_weights(blend)
-        return choose_terrain(combined)
+    def determine_ecosystem(self, gx, gy, height):
+        """根据坐标和高度确定生态系统（修改后的逻辑）"""
+        # 高海拔区域强制为熔岩生态系统
+        if height >= MOUNTAIN_HEIGHT_THRESHOLD:
+            return Ecosystem.DESERT_LAVA
+
+        # 其他区域根据生态系统噪声确定
+        eco_value = self.ecosystem_noise([gx / ECOSYSTEM_SCALE, gy / ECOSYSTEM_SCALE])
+
+        if eco_value < -0.23:
+            return Ecosystem.DARK_FOREST
+        elif eco_value < 0.07:
+            return Ecosystem.GRASSLAND
+        elif eco_value < 0.5:
+            return Ecosystem.MOUNTAIN
+        else:
+            return Ecosystem.DESERT_LAVA  # 仅在中低海拔可能出现
 
     def generate_base_terrain(self, chunk_x, chunk_y):
-        """生成基础地形（优化高度过渡）"""
+        """生成基础地形（修改后的版本）"""
         chunk = []
         for local_y in range(self.chunk_size):
             row = []
@@ -299,54 +333,65 @@ class GameMap:
                 gx = chunk_x * self.chunk_size + local_x
                 gy = chunk_y * self.chunk_size + local_y
 
-                # 获取平滑后的高度值
+                # 生成高度值（保持不变）
                 height = self.get_height(gx, gy)
 
-                # 优化后的地形过渡逻辑
+                # 确定生态系统（新增逻辑）
+                ecosystem = self.determine_ecosystem(gx, gy, height)
+
+                # 根据高度和生态系统生成地形（新增逻辑）
                 if height < 0.35:
-                    # 水域渐变过渡
-                    if height <0.32:
+                    if height < 0.31:
                         terrain = Terrain.WATER
                     else:
+                        mud_weight = self.smooth_transition(height, 0.3, 0.35)
                         terrain = random.choices(
-                        [Terrain.WATER, Terrain.MUD],
-                        weights=[30, 70]
-                    )[0]
-                elif height > 0.65:
-                    # 山地渐变过渡
-                    mountain_weight = self.smooth_transition(height, 0.65, 0.7)
-                    terrain = random.choices(
-                        [Terrain.ROCK, self.get_mid_terrain(gx, gy)],
-                        weights=[mountain_weight * 100, (1 - mountain_weight) * 100]
-                    )[0]
+                            [Terrain.GRASS, Terrain.MUD],
+                            weights=[mud_weight * 100, (1 - mud_weight) * 100]
+                        )[0]
+                elif height < 0.6:
+                    # 低地区域，使用生态系统对应的低地地形
+                    weights = ECOSYSTEM_TERRAIN_WEIGHTS[ecosystem]
+                    terrain = choose_terrain(weights)
                 else:
-                    # 中间地带使用原逻辑
-                    blend = get_ecosystem_blend(gx, gy)
-                    combined = get_combined_weights(blend)
-                    terrain = choose_terrain(combined)
+                    # 高地区域，根据生态系统生成不同岩石
+                    if ecosystem in [Ecosystem.GRASSLAND, Ecosystem.DARK_FOREST]:
+                        terrain = Terrain.ROCK
+                    elif ecosystem == Ecosystem.MOUNTAIN:
+                        terrain = Terrain.SANDSTONE
+                    elif ecosystem == Ecosystem.DESERT_LAVA:
+                        terrain = Terrain.BASALT
 
                 row.append(terrain)
             chunk.append(row)
         return self.post_process_chunk(chunk)
 
     def post_process_chunk(self, chunk):
-        """区块后处理"""
-        # 使用细胞自动机平滑水域和山地
-        for _ in range(2):
-            chunk = self.apply_cellular_automaton(chunk,
-                                                  targets=[Terrain.WATER, Terrain.MUD],
-                                                  replace=Terrain.MUD,
-                                                  min_neighbors=3
-                                                  )
-            chunk = self.apply_cellular_automaton(chunk,
-                                                  targets=[Terrain.ROCK, Terrain.BASALT],
-                                                  replace=Terrain.SANDSTONE,
-                                                  min_neighbors=4
-                                                  )
+        """区块后处理（优化后的版本）"""
+        # 水域平滑
+        chunk = self.apply_cellular_automaton(chunk,
+                                              targets=[Terrain.WATER],
+                                              replace=Terrain.MUD,
+                                              min_neighbors=4,
+                                              iterations=3)
+
+        # 熔岩区域平滑
+        chunk = self.apply_cellular_automaton(chunk,
+                                              targets=[Terrain.LAVA],
+                                              replace=Terrain.SAND,
+                                              min_neighbors=3,
+                                              iterations=2)
+
+        # 岩石区域平滑
+        chunk = self.apply_cellular_automaton(chunk,
+                                              targets=[Terrain.ROCK, Terrain.BASALT],
+                                              replace=Terrain.SANDSTONE,
+                                              min_neighbors=5,
+                                              iterations=2)
         return chunk
 
     def apply_cellular_automaton(self, chunk, targets, replace, min_neighbors, iterations=2):
-        """通用细胞自动机处理"""
+        """优化的细胞自动机方法"""
         for _ in range(iterations):
             new_chunk = [row.copy() for row in chunk]
             for y in range(1, self.chunk_size - 1):
@@ -354,25 +399,16 @@ class GameMap:
                     if chunk[y][x] not in targets:
                         continue
 
-                    neighbors = 0
-                    for dy in (-1, 0, 1):
-                        for dx in (-1, 0, 1):
-                            if dx == 0 and dy == 0:
-                                continue
-                            if chunk[y + dy][x + dx] in targets:
-                                neighbors += 1
+                    # 计算8邻域内同类数量
+                    neighbors = sum(
+                        1 for dy in (-1, 0, 1) for dx in (-1, 0, 1)
+                        if (dx, dy) != (0, 0) and chunk[y + dy][x + dx] in targets
+                    )
 
                     if neighbors < min_neighbors:
                         new_chunk[y][x] = replace
             chunk = new_chunk
         return chunk
-
-    def generate_chunk(self, chunk_x, chunk_y):
-        """生成地图区块"""
-        chunk = self.generate_base_terrain(chunk_x, chunk_y)
-        self.apply_water(chunk, chunk_x, chunk_y)
-        self.post_process_water(chunk)
-        self.terrain_map[(chunk_x, chunk_y)] = chunk
 
     def apply_water(self, chunk, chunk_x, chunk_y):
         """应用水系到区块"""
@@ -413,6 +449,13 @@ class GameMap:
         local_x = x % self.chunk_size
         local_y = y % self.chunk_size
         return self.terrain_map[(chunk_x, chunk_y)][local_y][local_x]
+
+    def generate_chunk(self, chunk_x, chunk_y):
+        """生成地图区块"""
+        chunk = self.generate_base_terrain(chunk_x, chunk_y)
+        self.apply_water(chunk, chunk_x, chunk_y)
+        self.post_process_water(chunk)
+        self.terrain_map[(chunk_x, chunk_y)] = chunk
 
     def draw(self, surface, camera):
         """绘制地图"""
@@ -458,6 +501,7 @@ class GameMap:
                 rect = pygame.Rect(x * TILE_SIZE, y * TILE_SIZE, TILE_SIZE, TILE_SIZE)
                 screen_rect = camera.apply_rect(rect)
                 pygame.draw.rect(surface, color, screen_rect)
+
 # 技能系统 --------------------------------------------------
 class Skill:
     def __init__(self, name, skill_type, cost, effect, cooldown=0, range=1, target_type="single", description=""):
@@ -1168,6 +1212,11 @@ class Game:
         }
     }
 
+    def is_valid_spawn_position(self, x, y):
+        """检查是否是有效的生成位置（不在水中或岩浆中）"""
+        terrain = self.map.get_terrain(x, y)
+        return terrain not in (Terrain.WATER, Terrain.LAVA)
+
     def generate_npc_in_chunk(self, chunk_x, chunk_y, ecosystem):
         """在指定区块生成NPC（5%概率）"""
         if random.random() > 0.05:  # 95%概率不生成
@@ -1176,9 +1225,20 @@ class Game:
         # 获取商店配置
         shop_config = self.ECOSYSTEM_SHOPS[ecosystem]
 
-        # 随机生成位置（区块内的随机位置）
-        tile_x = chunk_x * CHUNK_SIZE + random.randint(2, CHUNK_SIZE - 3)
-        tile_y = chunk_y * CHUNK_SIZE + random.randint(2, CHUNK_SIZE - 3)
+        # 生成有效位置（最多尝试10次）
+        valid_pos = False
+        attempts = 0
+        while not valid_pos and attempts < 10:
+            # 随机生成位置（区块内的随机位置）
+            tile_x = chunk_x * CHUNK_SIZE + random.randint(2, CHUNK_SIZE - 3)
+            tile_y = chunk_y * CHUNK_SIZE + random.randint(2, CHUNK_SIZE - 3)
+            # 检查位置是否有效（不在水中或岩浆中）
+            valid_pos = self.is_valid_spawn_position(tile_x, tile_y)
+            attempts += 1
+
+        if not valid_pos:
+            return  # 如果找不到有效位置，跳过生成
+
         npc_pos = (tile_x * TILE_SIZE, tile_y * TILE_SIZE)
 
         # 生成商店物品
@@ -1206,9 +1266,9 @@ class Game:
             item.value = random.randint(15, 50)
             shop_items.append(item)
 
-        # 创建NPC，传入生态系统的主题色
+        # 创建NPC
         npc = NPC(npc_pos, shop_items)
-        # 移除覆盖颜色的代码，保留初始化时绘制的图案
+        npc.image.fill(shop_config["color"])
         npc.dialogue = self.get_random_dialogue(ecosystem)
 
         # 添加到游戏世界
@@ -1404,15 +1464,25 @@ class Game:
         main_ecosystem = max(blend, key=lambda x: x[1])[0]
 
         # 生成 NPC（5% 概率）
-        if random.random() < 0.9:  # 5% 概率生成 NPC
+        if random.random() < 0.05:  # 5% 概率生成 NPC
             self.generate_npc_in_chunk(chunk_x, chunk_y, main_ecosystem)
 
         # 生成敌人
         num_enemies = random.randint(1, 4)  # 每个区块生成 1-4 个敌人
         for _ in range(num_enemies):
-            # 随机生成敌人的位置
-            tile_x = random.randint(start_x, end_x - 1)
-            tile_y = random.randint(start_y, end_y - 1)
+            # 尝试生成有效位置（最多尝试10次）
+            valid_pos = False
+            attempts = 0
+            while not valid_pos and attempts < 10:
+                # 随机生成敌人的位置
+                tile_x = random.randint(start_x, end_x - 1)
+                tile_y = random.randint(start_y, end_y - 1)
+                # 检查位置是否有效（不在水中或岩浆中）
+                valid_pos = self.is_valid_spawn_position(tile_x, tile_y)
+                attempts += 1
+
+            if not valid_pos:
+                continue  # 如果找不到有效位置，跳过生成
 
             # 根据生态系统生成对应类型的怪物
             monster_type = self.get_monster_type(main_ecosystem)
