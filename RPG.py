@@ -35,17 +35,22 @@ COLORS = {
     "potion_blue": (0, 0, 255),
 }
 
+# 游戏配置
+TILE_SIZE = 16
+PLAYER_SPEED = 5
+SCREEN_WIDTH, SCREEN_HEIGHT = 2400, 1200
+CHUNK_SIZE = 32  # 每个区块包含16x16的瓷砖
 
 # 生态系统类型
 class Ecosystem(Enum):
     GRASSLAND = 1  # 草原泥土地
     DARK_FOREST = 2  # 黑森林
-    MOUNTAIN = 3  # 山岭地带
-    DESERT_LAVA = 4  # 沙漠熔岩地
+    DESERT = 3  # 山岭地带
+    VOLCANO = 4  # 沙漠熔岩地
 
 # 生态系统生成参数
 ECOSYSTEM_OCTAVES = 4      # 噪声的octave数
-ECOSYSTEM_SCALE = 200.0    # 控制生态系统的规模
+ECOSYSTEM_SCALE = 100 * TILE_SIZE    # 控制生态系统的规模
 MOUNTAIN_HEIGHT_THRESHOLD = 0.7  # 熔岩生态系统最小高度阈值
 ECOSYSTEM_SEED = 12345     # 生态系统噪声种子
 
@@ -53,8 +58,8 @@ ECOSYSTEM_SEED = 12345     # 生态系统噪声种子
 ECOSYSTEM_THRESHOLDS = {
     Ecosystem.GRASSLAND: (-0.8, -0.2),  # 草原泥土地
     Ecosystem.DARK_FOREST: (-0.2, 0.3), # 黑森林
-    Ecosystem.MOUNTAIN: (0.3, 0.6),     # 山岭地带
-    Ecosystem.DESERT_LAVA: (0.6, 1.0)   # 沙漠熔岩地
+    Ecosystem.DESERT: (0.3, 0.6),     # 山岭地带
+    Ecosystem.VOLCANO: (0.6, 1.0)   # 沙漠熔岩地
 }
 
 # 地形类型
@@ -70,7 +75,7 @@ class Terrain(Enum):
     SAND = 8        # 沙漠
     BASALT = 9      # 玄武岩
     LAVA = 10       # 熔岩
-    WATER = 11      # 新增水地形
+    WATER = 11      # 水
 
 # 地形通行性配置
 TERRAIN_PASSABLE = {
@@ -92,8 +97,8 @@ TERRAIN_PASSABLE = {
 # 在所有生态系统地形权重
 ECOSYSTEM_TERRAIN_WEIGHTS = {
     Ecosystem.GRASSLAND: [
-        (Terrain.GRASS, 70),
-        (Terrain.MUD, 25),
+        (Terrain.GRASS, 85),
+        (Terrain.MUD, 10),
         (Terrain.SMALL_TREE, 5)
     ],
     Ecosystem.DARK_FOREST: [
@@ -101,21 +106,18 @@ ECOSYSTEM_TERRAIN_WEIGHTS = {
         (Terrain.BIG_TREE, 55),
         (Terrain.THORNS, 5)
     ],
-    Ecosystem.MOUNTAIN: [
-        (Terrain.ROCK, 85),
-        (Terrain.SANDSTONE, 15)
+    Ecosystem.DESERT: [
+        (Terrain.ROCK, 10),
+        (Terrain.SAND, 70),
+        (Terrain.SANDSTONE, 20),
     ],
-    Ecosystem.DESERT_LAVA: [
-        (Terrain.SAND, 60),
-        (Terrain.LAVA, 40)
+    Ecosystem.VOLCANO: [
+        (Terrain.BASALT, 70),
+        (Terrain.ROCK, 20),
+        (Terrain.LAVA, 10)
     ]
 }
 
-# 游戏配置
-TILE_SIZE = 2
-PLAYER_SPEED = 5
-SCREEN_WIDTH, SCREEN_HEIGHT = 2400, 1200
-CHUNK_SIZE = 32  # 每个区块包含16x16的瓷砖
 
 # 初始化Pygame
 pygame.init()
@@ -153,6 +155,42 @@ class ItemType(Enum):
     COIN = 4
 
 # 生态系统 --------------------------------------------------
+
+# 生态系统商店配置
+ECOSYSTEM_SHOPS = {
+    Ecosystem.GRASSLAND: {
+        "items": [
+            (ItemType.POTION, {"potion_red": 0.7, "potion_blue": 0.3}),
+            (ItemType.WEAPON, {WeaponType.SHORTSWORD: 0.6, WeaponType.SPEAR: 0.4}),
+            (ItemType.ARMOR, {"leather": 1.0})
+        ],
+        "color": (0, 255, 0)  # 绿色主题
+    },
+    Ecosystem.DARK_FOREST: {
+        "items": [
+            (ItemType.POTION, {"potion_red": 0.4, "potion_blue": 0.6}),
+            (ItemType.WEAPON, {WeaponType.DAGGER: 0.8, WeaponType.SHORTSWORD: 0.2}),
+            (ItemType.ARMOR, {"chainmail": 1.0})
+        ],
+        "color": (0, 100, 0)  # 深绿主题
+    },
+    Ecosystem.DESERT: {
+        "items": [
+            (ItemType.POTION, {"potion_red": 0.5, "potion_blue": 0.5}),
+            (ItemType.WEAPON, {WeaponType.GREATSWORD: 0.7, WeaponType.SPEAR: 0.3}),
+            (ItemType.ARMOR, {"plate": 1.0})
+        ],
+        "color": (128, 128, 128)  # 灰色主题
+    },
+    Ecosystem.VOLCANO: {
+        "items": [
+            (ItemType.POTION, {"potion_red": 0.9, "potion_blue": 0.1}),
+            (ItemType.WEAPON, {WeaponType.GREATSWORD: 0.5, WeaponType.SPEAR: 0.5}),
+            (ItemType.ARMOR, {"plate": 0.7, "chainmail": 0.3})
+        ],
+        "color": (255, 69, 0)  # 熔岩主题
+    }
+}
 
 def get_ecosystem_value(gx, gy):
     """生成连贯的生态系统值"""
@@ -195,17 +233,17 @@ def get_ecosystem_blend(gx, gy):
     elif value < 0.65:
         # 黑森林到山地的过渡
         weight = (0.65 - value) / 0.1
-        return [(Ecosystem.DARK_FOREST, weight), (Ecosystem.MOUNTAIN, 1 - weight)]
+        return [(Ecosystem.DARK_FOREST, weight), (Ecosystem.DESERT, 1 - weight)]
     elif value < 0.75:
         # 山地到熔岩地的过渡（新增）
         weight = (0.75 - value) / 0.1
-        return [(Ecosystem.MOUNTAIN, weight), (Ecosystem.DESERT_LAVA, 1 - weight)]
+        return [(Ecosystem.DESERT, weight), (Ecosystem.VOLCANO, 1 - weight)]
     elif value < 0.85:
         # 熔岩地区域
-        return [(Ecosystem.DESERT_LAVA, 1.0)]
+        return [(Ecosystem.VOLCANO, 1.0)]
     else:
         # 极端熔岩地区域（新增）
-        return [(Ecosystem.DESERT_LAVA, 1.0)]
+        return [(Ecosystem.VOLCANO, 1.0)]
 
 
 def get_combined_weights(blend):
@@ -306,23 +344,34 @@ class GameMap:
         t = max(0, min(1, t))
         return t * t * (3 - 2 * t)  # 三次平滑曲线
 
+    def is_valid_spawn_position(self, x, y):
+        """
+        检查某个位置是否适合生成敌人或 NPC。
+        返回 True 如果位置有效（不在水中或岩浆中），否则返回 False。
+        """
+        terrain = self.get_terrain(x, y)
+        # 如果地形是水或岩浆，则不适合生成
+        if terrain in (Terrain.WATER, Terrain.LAVA):
+            return False
+        return True
+
     def determine_ecosystem(self, gx, gy, height):
         """根据坐标和高度确定生态系统（修改后的逻辑）"""
         # 高海拔区域强制为熔岩生态系统
         if height >= MOUNTAIN_HEIGHT_THRESHOLD:
-            return Ecosystem.DESERT_LAVA
+            return Ecosystem.VOLCANO
 
         # 其他区域根据生态系统噪声确定
         eco_value = self.ecosystem_noise([gx / ECOSYSTEM_SCALE, gy / ECOSYSTEM_SCALE])
 
         if eco_value < -0.23:
             return Ecosystem.DARK_FOREST
-        elif eco_value < 0.07:
+        elif eco_value < 0.1:
             return Ecosystem.GRASSLAND
         elif eco_value < 0.5:
-            return Ecosystem.MOUNTAIN
+            return Ecosystem.DESERT
         else:
-            return Ecosystem.DESERT_LAVA  # 仅在中低海拔可能出现
+            return Ecosystem.VOLCANO  # 仅在中低海拔可能出现
 
     def generate_base_terrain(self, chunk_x, chunk_y):
         """生成基础地形（修改后的版本）"""
@@ -357,9 +406,9 @@ class GameMap:
                     # 高地区域，根据生态系统生成不同岩石
                     if ecosystem in [Ecosystem.GRASSLAND, Ecosystem.DARK_FOREST]:
                         terrain = Terrain.ROCK
-                    elif ecosystem == Ecosystem.MOUNTAIN:
+                    elif ecosystem == Ecosystem.DESERT:
                         terrain = Terrain.SANDSTONE
-                    elif ecosystem == Ecosystem.DESERT_LAVA:
+                    elif ecosystem == Ecosystem.VOLCANO:
                         terrain = Terrain.BASALT
 
                 row.append(terrain)
@@ -1176,42 +1225,6 @@ class Game:
         self.game_over = False
         self.check_chunks()  # 初始化区块生成
 
-    # 生态系统商店配置
-    ECOSYSTEM_SHOPS = {
-        Ecosystem.GRASSLAND: {
-            "items": [
-                (ItemType.POTION, {"potion_red": 0.7, "potion_blue": 0.3}),
-                (ItemType.WEAPON, {WeaponType.SHORTSWORD: 0.6, WeaponType.SPEAR: 0.4}),
-                (ItemType.ARMOR, {"leather": 1.0})
-            ],
-            "color": (0, 255, 0)  # 绿色主题
-        },
-        Ecosystem.DARK_FOREST: {
-            "items": [
-                (ItemType.POTION, {"potion_red": 0.4, "potion_blue": 0.6}),
-                (ItemType.WEAPON, {WeaponType.DAGGER: 0.8, WeaponType.SHORTSWORD: 0.2}),
-                (ItemType.ARMOR, {"chainmail": 1.0})
-            ],
-            "color": (0, 100, 0)  # 深绿主题
-        },
-        Ecosystem.MOUNTAIN: {
-            "items": [
-                (ItemType.POTION, {"potion_red": 0.5, "potion_blue": 0.5}),
-                (ItemType.WEAPON, {WeaponType.GREATSWORD: 0.7, WeaponType.SPEAR: 0.3}),
-                (ItemType.ARMOR, {"plate": 1.0})
-            ],
-            "color": (128, 128, 128)  # 灰色主题
-        },
-        Ecosystem.DESERT_LAVA: {
-            "items": [
-                (ItemType.POTION, {"potion_red": 0.9, "potion_blue": 0.1}),
-                (ItemType.WEAPON, {WeaponType.GREATSWORD: 0.5, WeaponType.SPEAR: 0.5}),
-                (ItemType.ARMOR, {"plate": 0.7, "chainmail": 0.3})
-            ],
-            "color": (255, 69, 0)  # 熔岩主题
-        }
-    }
-
     def is_valid_spawn_position(self, x, y):
         """检查是否是有效的生成位置（不在水中或岩浆中）"""
         terrain = self.map.get_terrain(x, y)
@@ -1223,7 +1236,7 @@ class Game:
             return
 
         # 获取商店配置
-        shop_config = self.ECOSYSTEM_SHOPS[ecosystem]
+        shop_config = ECOSYSTEM_SHOPS[ecosystem]
 
         # 生成有效位置（最多尝试10次）
         valid_pos = False
@@ -1334,11 +1347,11 @@ class Game:
                 "迷途的旅人...需要幫助嗎？",
                 "小心森林中的陷阱，買些裝備吧"
             ],
-            Ecosystem.MOUNTAIN: [
+            Ecosystem.DESERT: [
                 "堅固的裝備才能征服高山！",
                 "礦石打造的精品武器，不看看嗎？"
             ],
-            Ecosystem.DESERT_LAVA: [
+            Ecosystem.VOLCANO: [
                 "炎熱之地必備的生存裝備！",
                 "用火山礦打造的稀有武器！"
             ]
@@ -1388,30 +1401,54 @@ class Game:
                     gx = current_chunk[0] * CHUNK_SIZE + CHUNK_SIZE // 2
                     gy = current_chunk[1] * CHUNK_SIZE + CHUNK_SIZE // 2
 
+                    # 获取区块的高度值
+                    height = self.map.get_height(gx, gy)  # 通过 self.map 调用 get_height
+
                     # 获取区块的主要生态系统
-                    blend = get_ecosystem_blend(gx, gy)
-                    main_ecosystem = max(blend, key=lambda x: x[1])[0]
+                    ecosystem = self.map.determine_ecosystem(gx, gy, height)  # 通过 self.map 调用 determine_ecosystem
 
                     # 生成敌人
                     self.generate_enemies_in_chunk(*current_chunk)
 
                     # 生成 NPC（5% 概率）
                     if random.random() < 0.05:  # 5% 概率生成 NPC
-                        self.generate_npc_in_chunk(current_chunk[0], current_chunk[1], main_ecosystem)
+                        self.generate_npc_in_chunk(current_chunk[0], current_chunk[1])
 
                     # 标记区块为已生成
                     self.generated_chunks.add(current_chunk)
-    def generate_npc_in_chunk(self, chunk_x, chunk_y, ecosystem):
+
+    def generate_npc_in_chunk(self, chunk_x, chunk_y):
         """在指定区块生成NPC（5%概率）"""
         if random.random() > 0.05:  # 95%概率不生成
             return
 
-        # 获取商店配置
-        shop_config = self.ECOSYSTEM_SHOPS[ecosystem]
+        # 获取区块的中心坐标
+        gx = chunk_x * CHUNK_SIZE + CHUNK_SIZE // 2
+        gy = chunk_y * CHUNK_SIZE + CHUNK_SIZE // 2
 
-        # 随机生成位置（区块内的随机位置）
-        tile_x = chunk_x * CHUNK_SIZE + random.randint(2, CHUNK_SIZE - 3)
-        tile_y = chunk_y * CHUNK_SIZE + random.randint(2, CHUNK_SIZE - 3)
+        # 获取区块的高度值
+        height = self.map.get_height(gx, gy)  # 通过 self.map 调用 get_height
+
+        # 根据高度和坐标确定生态系统
+        ecosystem = self.map.determine_ecosystem(gx, gy, height)  # 通过 self.map 调用 determine_ecosystem
+
+        # 获取商店配置
+        shop_config = ECOSYSTEM_SHOPS[ecosystem]
+
+        # 生成有效位置（最多尝试10次）
+        valid_pos = False
+        attempts = 0
+        while not valid_pos and attempts < 10:
+            # 随机生成位置（区块内的随机位置）
+            tile_x = chunk_x * CHUNK_SIZE + random.randint(2, CHUNK_SIZE - 3)
+            tile_y = chunk_y * CHUNK_SIZE + random.randint(2, CHUNK_SIZE - 3)
+            # 检查位置是否有效（不在水中或岩浆中）
+            valid_pos = self.map.is_valid_spawn_position(tile_x, tile_y)  # 通过 self.map 调用 is_valid_spawn_position
+            attempts += 1
+
+        if not valid_pos:
+            return  # 如果找不到有效位置，跳过生成
+
         npc_pos = (tile_x * TILE_SIZE, tile_y * TILE_SIZE)
 
         # 生成商店物品
@@ -1459,13 +1496,11 @@ class Game:
         gx = chunk_x * CHUNK_SIZE + CHUNK_SIZE // 2
         gy = chunk_y * CHUNK_SIZE + CHUNK_SIZE // 2
 
-        # 获取区块的主要生态系统
-        blend = get_ecosystem_blend(gx, gy)
-        main_ecosystem = max(blend, key=lambda x: x[1])[0]
+        # 获取区块的高度值
+        height = self.map.get_height(gx, gy)  # 通过 self.map 调用 get_height
 
-        # 生成 NPC（5% 概率）
-        if random.random() < 0.05:  # 5% 概率生成 NPC
-            self.generate_npc_in_chunk(chunk_x, chunk_y, main_ecosystem)
+        # 根据高度和坐标确定生态系统
+        ecosystem = self.map.determine_ecosystem(gx, gy, height)  # 通过 self.map 调用 determine_ecosystem
 
         # 生成敌人
         num_enemies = random.randint(1, 4)  # 每个区块生成 1-4 个敌人
@@ -1478,14 +1513,14 @@ class Game:
                 tile_x = random.randint(start_x, end_x - 1)
                 tile_y = random.randint(start_y, end_y - 1)
                 # 检查位置是否有效（不在水中或岩浆中）
-                valid_pos = self.is_valid_spawn_position(tile_x, tile_y)
+                valid_pos = self.map.is_valid_spawn_position(tile_x, tile_y)  # 通过 self.map 调用 is_valid_spawn_position
                 attempts += 1
 
             if not valid_pos:
                 continue  # 如果找不到有效位置，跳过生成
 
             # 根据生态系统生成对应类型的怪物
-            monster_type = self.get_monster_type(main_ecosystem)
+            monster_type = self.get_monster_type(ecosystem)
             monster = Monster(
                 pos=(tile_x * TILE_SIZE, tile_y * TILE_SIZE),
                 monster_type=monster_type
@@ -1508,11 +1543,11 @@ class Game:
                 (MonsterType.TROLL, 30),
                 (MonsterType.WOLF, 20)
             ],
-            Ecosystem.MOUNTAIN: [
+            Ecosystem.DESERT: [
                 (MonsterType.TROLL, 60),
                 (MonsterType.DRAGON, 10)
             ],
-            Ecosystem.DESERT_LAVA: [
+            Ecosystem.VOLCANO: [
                 (MonsterType.DRAGON, 70),
                 (MonsterType.TROLL, 30)
             ]
