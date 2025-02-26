@@ -9,6 +9,7 @@ from perlin_noise import PerlinNoise  # 需要安装 perlin-noise 库
 
 # 颜色定义
 COLORS = {
+    # Existing colors
     "grass": (34, 139, 34),  # 草原青草
     "mud": (139, 115, 85),  # 泥土地
     "small_tree": (0, 100, 0),  # 小树
@@ -21,6 +22,20 @@ COLORS = {
     "basalt": (75, 75, 75),  # 玄武岩
     "lava": (255, 69, 0),  # 熔岩
     "water": (30, 144, 255),  # 水
+
+    # New colors
+    "shallow_water": (100, 185, 237),  # 浅水
+    "cliff": (90, 90, 90),  # 悬崖
+    "meadow": (124, 252, 0),  # 草甸
+    "swamp": (53, 94, 59),  # 沼泽
+    "house_grass": (160, 82, 45),  # 草原房屋
+    "house_forest": (101, 67, 33),  # 森林房屋
+    "house_desert": (205, 133, 63),  # 沙漠房屋
+    "house_volcano": (153, 76, 0),  # 火山房屋
+    "village_center": (210, 105, 30),  # 村庄中心
+    "path": (222, 184, 135),  # 道路/小径
+
+    # Existing non-terrain colors
     "player": (0, 0, 255),
     "enemy": (255, 0, 0),
     "item": (255, 255, 0),
@@ -36,7 +51,7 @@ COLORS = {
 }
 
 # 游戏配置
-TILE_SIZE = 16
+TILE_SIZE = 2
 PLAYER_SPEED = 5
 SCREEN_WIDTH, SCREEN_HEIGHT = 2400, 1200
 CHUNK_SIZE = 32  # 每个区块包含16x16的瓷砖
@@ -76,6 +91,16 @@ class Terrain(Enum):
     BASALT = 9      # 玄武岩
     LAVA = 10       # 熔岩
     WATER = 11      # 水
+    SHALLOW_WATER = 12  # 浅水
+    CLIFF = 13      # 悬崖
+    MEADOW = 14     # 草甸
+    SWAMP = 15      # 沼泽
+    HOUSE_GRASS = 16  # 草原房屋
+    HOUSE_FOREST = 17  # 森林房屋
+    HOUSE_DESERT = 18  # 沙漠房屋
+    HOUSE_VOLCANO = 19  # 火山房屋
+    VILLAGE_CENTER = 20  # 村庄中心
+    PATH = 21       # 道路/小径
 
 # 地形通行性配置
 TERRAIN_PASSABLE = {
@@ -83,38 +108,52 @@ TERRAIN_PASSABLE = {
     Terrain.MUD: True,
     Terrain.SMALL_TREE: True,
     Terrain.DARK_GRASS: True,
-    Terrain.BIG_TREE: True,
-    Terrain.THORNS: True,
-    Terrain.ROCK: True,
+    Terrain.BIG_TREE: False,  # Changed to False for better gameplay
+    Terrain.THORNS: False,    # Changed to False for better gameplay
+    Terrain.ROCK: False,      # Changed to False for better gameplay
     Terrain.SANDSTONE: True,
     Terrain.SAND: True,
-    Terrain.BASALT: True,
-    Terrain.LAVA: True,
-    Terrain.WATER: True
+    Terrain.BASALT: False,    # Changed to False for better gameplay
+    Terrain.LAVA: False,      # Changed to False (lava should be dangerous)
+    Terrain.WATER: False,     # Changed to False (can't walk on water)
+    Terrain.SHALLOW_WATER: True,  # You can walk in shallow water
+    Terrain.CLIFF: False,     # You can't walk on cliffs
+    Terrain.MEADOW: True,
+    Terrain.SWAMP: True,      # Can walk, but maybe should slow down the player
+    Terrain.HOUSE_GRASS: True,
+    Terrain.HOUSE_FOREST: True,
+    Terrain.HOUSE_DESERT: True,
+    Terrain.HOUSE_VOLCANO: True,
+    Terrain.VILLAGE_CENTER: True,
+    Terrain.PATH: True,
 }
 
 
 # 在所有生态系统地形权重
 ECOSYSTEM_TERRAIN_WEIGHTS = {
     Ecosystem.GRASSLAND: [
-        (Terrain.GRASS, 85),
+        (Terrain.GRASS, 75),
         (Terrain.MUD, 10),
-        (Terrain.SMALL_TREE, 5)
+        (Terrain.SMALL_TREE, 5),
+        (Terrain.MEADOW, 10)
     ],
     Ecosystem.DARK_FOREST: [
-        (Terrain.DARK_GRASS, 40),
-        (Terrain.BIG_TREE, 55),
-        (Terrain.THORNS, 5)
+        (Terrain.DARK_GRASS, 35),
+        (Terrain.BIG_TREE, 45),
+        (Terrain.THORNS, 5),
+        (Terrain.SWAMP, 15)
     ],
     Ecosystem.DESERT: [
         (Terrain.ROCK, 10),
-        (Terrain.SAND, 70),
+        (Terrain.SAND, 65),
         (Terrain.SANDSTONE, 20),
+        (Terrain.CLIFF, 5)
     ],
     Ecosystem.VOLCANO: [
-        (Terrain.BASALT, 70),
+        (Terrain.BASALT, 65),
         (Terrain.ROCK, 20),
-        (Terrain.LAVA, 10)
+        (Terrain.LAVA, 10),
+        (Terrain.CLIFF, 5)
     ]
 }
 
@@ -125,6 +164,64 @@ screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
 pygame.display.set_caption("像素RPG")
 clock = pygame.time.Clock()
 
+# 建筑生成
+
+class Building:
+    def __init__(self, position, building_type, size=(3, 3)):
+        """
+        Initialize a building structure
+
+        Args:
+            position (tuple): (x, y) coordinates for the building center
+            building_type (Terrain): The terrain type for this building
+            size (tuple): Width and height of the building in tiles
+        """
+        self.position = position
+        self.type = building_type
+        self.size = size
+        self.tiles = set()  # Set of tile positions that make up the building
+        self.generate_structure()
+
+    def generate_structure(self):
+        """Generate the building's structure and add tiles to the set"""
+        center_x, center_y = self.position
+        width, height = self.size
+
+        # Calculate the top-left corner
+        start_x = center_x - (width // 2)
+        start_y = center_y - (height // 2)
+
+        # Add building tiles
+        for y in range(height):
+            for x in range(width):
+                self.tiles.add((start_x + x, start_y + y))
+
+        # Add paths leading to the building
+        self.add_paths()
+
+    def add_paths(self):
+        """Add paths leading to/from the building"""
+        center_x, center_y = self.position
+
+        # Determine path length (random between 3-7 tiles)
+        path_length = random.randint(3, 7)
+
+        # Choose a random direction for the path (0=North, 1=East, 2=South, 3=West)
+        direction = random.randint(0, 3)
+
+        # Add path tiles
+        if direction == 0:  # North
+            for i in range(1, path_length + 1):
+                self.tiles.add((center_x, center_y - (self.size[1] // 2) - i))
+        elif direction == 1:  # East
+            for i in range(1, path_length + 1):
+                self.tiles.add((center_x + (self.size[0] // 2) + i, center_y))
+        elif direction == 2:  # South
+            for i in range(1, path_length + 1):
+                self.tiles.add((center_x, center_y + (self.size[1] // 2) + i))
+        else:  # West
+            for i in range(1, path_length + 1):
+                self.tiles.add((center_x - (self.size[0] // 2) - i, center_y))
 
 # 新增枚举类型
 class WeaponType(Enum):
@@ -297,24 +394,44 @@ class GameMap:
         self.river_network = set()  # 河流坐标
         self.lake_areas = set()  # 湖泊坐标
         self.generated_chunks = set()  # 记录已生成的区块
+        self.buildings = {}  # Dictionary to store building structures keyed by chunk coordinates
 
         # 初始化随机种子
         self.seed = random.randint(0, 999999)
         detail_seed = 7 * self.seed % 117
+        river_seed = 13 * self.seed % 91
+        cliff_seed = 19 * self.seed % 67
+        building_seed = 23 * self.seed % 73
 
-        # 地形高度噪声生成器（使用随机种子）
+        # 地形高度噪声生成器
         self.base_noise = PerlinNoise(octaves=2, seed=self.seed)
-        self.detail_noise = PerlinNoise(octaves=4, seed=detail_seed)  # 不同种子
+        self.detail_noise = PerlinNoise(octaves=4, seed=detail_seed)
+        self.river_noise = PerlinNoise(octaves=3, seed=river_seed)
+        self.cliff_noise = PerlinNoise(octaves=5, seed=cliff_seed)
+        self.building_noise = PerlinNoise(octaves=2, seed=building_seed)
+
+        # 噪声参数
         self.height_scale = 256.0  # 增大采样范围
         self.detail_scale = 64.0  # 细节噪声采样范围
+        self.river_scale = 150.0  # 河流噪声采样范围
+        self.cliff_scale = 100.0  # 悬崖噪声采样范围
+        self.building_scale = 500.0  # 建筑物噪声采样范围
         self.detail_strength = 0.3  # 细节噪声强度
         self.mountain_threshold = 0.35  # 山地阈值
+        self.river_threshold = 0.92  # 河流生成阈值
+        self.building_threshold = 0.85  # 建筑物生成阈值
 
         # 独立生态系统噪声生成器
         self.ecosystem_noise = PerlinNoise(
             octaves=ECOSYSTEM_OCTAVES,
             seed=self.seed + 2  # 使用独立随机种子
         )
+
+        # Village generation parameters
+        self.village_density = 0.02  # Chance of village center per chunk
+        self.building_cluster_radius = 15  # Radius for building clusters around village centers
+        self.min_building_distance = 5  # Minimum distance between buildings
+        self.village_buildings = {}  # Dictionary to track village centers and surrounding buildings
 
     def get_height(self, x, y):
         """获取平滑的高度值（0-1）"""
@@ -333,6 +450,18 @@ class GameMap:
         # 归一化到0-1范围
         return height
 
+    def get_river_value(self, x, y):
+        """获取河流噪声值"""
+        return self.river_noise([x / self.river_scale, y / self.river_scale])
+
+    def get_cliff_value(self, x, y):
+        """获取悬崖噪声值"""
+        return self.cliff_noise([x / self.cliff_scale, y / self.cliff_scale])
+
+    def get_building_value(self, x, y):
+        """获取建筑物噪声值"""
+        return self.building_noise([x / self.building_scale, y / self.building_scale])
+
     def smoothstep(self, value):
         """S曲线过渡函数"""
         value = max(0, min(1, (value + 1) / 2))  # 先归一化到0-1
@@ -350,20 +479,82 @@ class GameMap:
         返回 True 如果位置有效（不在水中或岩浆中），否则返回 False。
         """
         terrain = self.get_terrain(x, y)
-        # 如果地形是水或岩浆，则不适合生成
-        if terrain in (Terrain.WATER, Terrain.LAVA):
-            return False
+        # If the terrain is water, lava, cliff, or any other impassable terrain, it's invalid
+        return TERRAIN_PASSABLE.get(terrain, True)
+
+    def is_valid_building_position(self, x, y, size_x=3, size_y=3):
+        """
+        检查位置是否适合放置建筑物
+
+        Args:
+            x, y: 建筑物中心位置
+            size_x, size_y: 建筑物尺寸
+
+        Returns:
+            Boolean: 是否是有效的建筑位置
+        """
+        # Check if the entire building footprint is on valid terrain
+        start_x = x - (size_x // 2)
+        start_y = y - (size_y // 2)
+
+        for check_y in range(start_y, start_y + size_y):
+            for check_x in range(start_x, start_x + size_x):
+                terrain = self.get_terrain(check_x, check_y)
+
+                # Cannot build on water, lava, cliff, or existing structures
+                if terrain in (Terrain.WATER, Terrain.LAVA, Terrain.CLIFF,
+                               Terrain.SHALLOW_WATER, Terrain.BIG_TREE,
+                               Terrain.HOUSE_GRASS, Terrain.HOUSE_FOREST,
+                               Terrain.HOUSE_DESERT, Terrain.HOUSE_VOLCANO,
+                               Terrain.VILLAGE_CENTER):
+                    return False
+
+        # Check for nearby buildings (avoid overcrowding)
+        for b_chunk in self.buildings.values():
+            for building in b_chunk:
+                if abs(building.position[0] - x) < self.min_building_distance and \
+                        abs(building.position[1] - y) < self.min_building_distance:
+                    return False
+
         return True
 
     def determine_ecosystem(self, gx, gy, height):
-        """根据坐标和高度确定生态系统（修改后的逻辑）"""
+        """根据坐标和高度确定生态系统（改进版）"""
         # 高海拔区域强制为熔岩生态系统
         if height >= MOUNTAIN_HEIGHT_THRESHOLD:
             return Ecosystem.VOLCANO
 
+        # 河流和湖泊区域
+        if (gx, gy) in self.river_network or (gx, gy) in self.lake_areas:
+            # Determine the ecosystem for water features based on surroundings
+            # Sample ecosystem values in a 3x3 area around the water
+            ecosystem_votes = []
+            for dy in range(-1, 2):
+                for dx in range(-1, 2):
+                    if dx == 0 and dy == 0:
+                        continue
+
+                    # Get the ecosystem value at this surrounding tile
+                    eco_value = self.ecosystem_noise([(gx + dx) / ECOSYSTEM_SCALE, (gy + dy) / ECOSYSTEM_SCALE])
+
+                    # Convert to ecosystem type
+                    if eco_value < -0.23:
+                        ecosystem_votes.append(Ecosystem.DARK_FOREST)
+                    elif eco_value < 0.1:
+                        ecosystem_votes.append(Ecosystem.GRASSLAND)
+                    elif eco_value < 0.5:
+                        ecosystem_votes.append(Ecosystem.DESERT)
+                    else:
+                        ecosystem_votes.append(Ecosystem.VOLCANO)
+
+            # Return the most common ecosystem
+            if ecosystem_votes:
+                return max(set(ecosystem_votes), key=ecosystem_votes.count)
+
         # 其他区域根据生态系统噪声确定
         eco_value = self.ecosystem_noise([gx / ECOSYSTEM_SCALE, gy / ECOSYSTEM_SCALE])
 
+        # Enhanced thresholds with more natural distribution
         if eco_value < -0.23:
             return Ecosystem.DARK_FOREST
         elif eco_value < 0.1:
@@ -371,37 +562,153 @@ class GameMap:
         elif eco_value < 0.5:
             return Ecosystem.DESERT
         else:
-            return Ecosystem.VOLCANO  # 仅在中低海拔可能出现
+            return Ecosystem.VOLCANO
+
+    def generate_rivers(self, chunk_x, chunk_y):
+        """Generate rivers within a chunk using improved flow algorithm"""
+        chunk_start_x = chunk_x * self.chunk_size
+        chunk_start_y = chunk_y * self.chunk_size
+
+        # Check if this chunk might have a river (optimization)
+        chunk_center_x = chunk_start_x + self.chunk_size // 2
+        chunk_center_y = chunk_start_y + self.chunk_size // 2
+        chunk_river_value = abs(self.get_river_value(chunk_center_x, chunk_center_y))
+
+        if chunk_river_value < 0.85:  # Skip chunks unlikely to have rivers
+            return set()
+
+        # River generation for this chunk
+        river_tiles = set()
+        for y in range(chunk_start_y, chunk_start_y + self.chunk_size):
+            for x in range(chunk_start_x, chunk_start_x + self.chunk_size):
+                # Get river noise value
+                river_value = abs(self.get_river_value(x, y))
+
+                # River main channels (high threshold for main waterways)
+                if river_value > self.river_threshold:
+                    river_tiles.add((x, y))
+
+                    # River banks (shallow water)
+                    for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                        bank_x, bank_y = x + dx, y + dy
+                        if (bank_x, bank_y) not in river_tiles:
+                            # Use a lower threshold for river banks
+                            if abs(self.get_river_value(bank_x, bank_y)) > self.river_threshold - 0.04:
+                                # Add as shallow water
+                                self.shallow_water_tiles.add((bank_x, bank_y))
+
+        return river_tiles
+
+    def generate_lakes(self, chunk_x, chunk_y):
+        """Generate lakes within a chunk"""
+        chunk_start_x = chunk_x * self.chunk_size
+        chunk_start_y = chunk_y * self.chunk_size
+
+        lake_tiles = set()
+        self.shallow_water_tiles = set()  # Initialize set for shallow water
+
+        # Use height and river values to determine lake placement
+        for y in range(chunk_start_y, chunk_start_y + self.chunk_size):
+            for x in range(chunk_start_x, chunk_start_x + self.chunk_size):
+                height = self.get_height(x, y)
+
+                # Lakes form in low areas
+                if height < 0.31:
+                    # Deep water in very low areas
+                    if height < 0.28:
+                        lake_tiles.add((x, y))
+                    # Shallow water around lakes
+                    elif height < 0.31:
+                        self.shallow_water_tiles.add((x, y))
+
+        return lake_tiles
 
     def generate_base_terrain(self, chunk_x, chunk_y):
-        """生成基础地形（修改后的版本）"""
+        """生成基础地形（改进版）"""
         chunk = []
+        # Add shallow water tracking for this chunk
+        self.shallow_water_tiles = set()
+
+        # Generate rivers and lakes for this chunk
+        river_tiles = self.generate_rivers(chunk_x, chunk_y)
+        lake_tiles = self.generate_lakes(chunk_x, chunk_y)
+
+        # Update global water networks
+        self.river_network.update(river_tiles)
+        self.lake_areas.update(lake_tiles)
+
+        # Generate village center if appropriate
+        village_center = None
+        if random.random() < self.village_density:
+            # Try to place a village center in this chunk
+            center_x = chunk_x * self.chunk_size + random.randint(5, self.chunk_size - 6)
+            center_y = chunk_y * self.chunk_size + random.randint(5, self.chunk_size - 6)
+
+            if self.is_valid_building_position(center_x, center_y, 5, 5):
+                village_center = (center_x, center_y)
+                self.village_buildings[(chunk_x, chunk_y)] = village_center
+
         for local_y in range(self.chunk_size):
             row = []
             for local_x in range(self.chunk_size):
                 gx = chunk_x * self.chunk_size + local_x
                 gy = chunk_y * self.chunk_size + local_y
 
-                # 生成高度值（保持不变）
+                # Check if this tile is part of a river or lake
+                if (gx, gy) in river_tiles or (gx, gy) in lake_tiles:
+                    row.append(Terrain.WATER)
+                    continue
+
+                # Check if this tile is shallow water
+                if (gx, gy) in self.shallow_water_tiles:
+                    row.append(Terrain.SHALLOW_WATER)
+                    continue
+
+                # Check if this is a village center
+                if village_center and gx == village_center[0] and gy == village_center[1]:
+                    row.append(Terrain.VILLAGE_CENTER)
+                    continue
+
+                # 生成高度值
                 height = self.get_height(gx, gy)
 
-                # 确定生态系统（新增逻辑）
+                # Cliffs based on height gradient and cliff noise
+                cliff_value = self.get_cliff_value(gx, gy)
+                if height > 0.6 and cliff_value > 0.7:
+                    row.append(Terrain.CLIFF)
+                    continue
+
+                # 确定生态系统
                 ecosystem = self.determine_ecosystem(gx, gy, height)
 
-                # 根据高度和生态系统生成地形（新增逻辑）
+                # Generate base terrain based on ecosystem and height
                 if height < 0.35:
-                    if height < 0.31:
+                    if height < 0.29:
                         terrain = Terrain.WATER
+                    elif height < 0.31:
+                        terrain = Terrain.SHALLOW_WATER
                     else:
-                        mud_weight = self.smooth_transition(height, 0.3, 0.35)
-                        terrain = random.choices(
-                            [Terrain.GRASS, Terrain.MUD],
-                            weights=[mud_weight * 100, (1 - mud_weight) * 100]
-                        )[0]
+                        # Low-lying areas near water can be swampy or muddy
+                        if ecosystem == Ecosystem.DARK_FOREST:
+                            terrain = random.choice([Terrain.SWAMP, Terrain.MUD])
+                        else:
+                            mud_weight = self.smooth_transition(height, 0.31, 0.35)
+                            terrain = random.choices(
+                                [Terrain.GRASS, Terrain.MUD],
+                                weights=[mud_weight * 100, (1 - mud_weight) * 100]
+                            )[0]
                 elif height < 0.6:
                     # 低地区域，使用生态系统对应的低地地形
                     weights = ECOSYSTEM_TERRAIN_WEIGHTS[ecosystem]
                     terrain = choose_terrain(weights)
+
+                    # Add meadows in grassland (more natural distribution)
+                    if ecosystem == Ecosystem.GRASSLAND and random.random() < 0.2:
+                        terrain = Terrain.MEADOW
+
+                    # Add more swamps in dark forest
+                    if ecosystem == Ecosystem.DARK_FOREST and height < 0.4 and random.random() < 0.3:
+                        terrain = Terrain.SWAMP
                 else:
                     # 高地区域，根据生态系统生成不同岩石
                     if ecosystem in [Ecosystem.GRASSLAND, Ecosystem.DARK_FOREST]:
@@ -411,23 +718,137 @@ class GameMap:
                     elif ecosystem == Ecosystem.VOLCANO:
                         terrain = Terrain.BASALT
 
+                # Place paths (if near village center)
+                if village_center:
+                    distance_to_village = math.sqrt((gx - village_center[0]) ** 2 + (gy - village_center[1]) ** 2)
+                    if distance_to_village <= 20:  # Maximum path distance from village center
+                        # Use noise to create organic paths
+                        path_noise = self.building_noise([gx / 10, gy / 10])
+                        if abs(path_noise) < 0.05 and terrain not in [Terrain.WATER, Terrain.LAVA, Terrain.CLIFF]:
+                            terrain = Terrain.PATH
+
                 row.append(terrain)
             chunk.append(row)
-        return self.post_process_chunk(chunk)
+
+        # Post-process the chunk
+        chunk = self.post_process_chunk(chunk)
+
+        # Generate buildings after terrain is established
+        self.generate_buildings(chunk_x, chunk_y, chunk, village_center)
+
+        return chunk
+
+    def generate_buildings(self, chunk_x, chunk_y, chunk, village_center=None):
+        """
+        Generate buildings within a chunk
+
+        Args:
+            chunk_x, chunk_y: Chunk coordinates
+            chunk: The terrain chunk data
+            village_center: Optional coordinates of a village center in this chunk
+        """
+        chunk_buildings = []
+        chunk_start_x = chunk_x * self.chunk_size
+        chunk_start_y = chunk_y * self.chunk_size
+
+        # Determine number of buildings to generate
+        num_buildings = 0
+
+        if village_center:
+            # More buildings around a village center (5-10)
+            num_buildings = random.randint(5, 10)
+        else:
+            # Less likely to have isolated buildings
+            if random.random() < 0.15:  # 15% chance for isolated buildings
+                num_buildings = random.randint(1, 3)
+
+        # Try to place buildings
+        for _ in range(num_buildings):
+            # Determine building position
+            if village_center:
+                # Place around village center in a cluster
+                angle = random.uniform(0, 2 * math.pi)
+                distance = random.uniform(5, self.building_cluster_radius)
+                bx = int(village_center[0] + distance * math.cos(angle))
+                by = int(village_center[1] + distance * math.sin(angle))
+            else:
+                # Random position within chunk
+                bx = chunk_start_x + random.randint(3, self.chunk_size - 4)
+                by = chunk_start_y + random.randint(3, self.chunk_size - 4)
+
+            # Check if position is valid for building
+            if not self.is_valid_building_position(bx, by):
+                continue
+
+            # Determine building type based on ecosystem
+            local_x = bx - chunk_start_x
+            local_y = by - chunk_start_y
+
+            # Make sure we're within valid chunk range
+            if 0 <= local_x < self.chunk_size and 0 <= local_y < self.chunk_size:
+                base_terrain = chunk[local_y][local_x]
+
+                # Map ecosystem to building type
+                if base_terrain in [Terrain.GRASS, Terrain.MEADOW, Terrain.MUD]:
+                    building_type = Terrain.HOUSE_GRASS
+                elif base_terrain in [Terrain.DARK_GRASS, Terrain.THORNS]:
+                    building_type = Terrain.HOUSE_FOREST
+                elif base_terrain in [Terrain.SAND, Terrain.SANDSTONE]:
+                    building_type = Terrain.HOUSE_DESERT
+                elif base_terrain in [Terrain.BASALT, Terrain.ROCK]:
+                    building_type = Terrain.HOUSE_VOLCANO
+                else:
+                    continue  # Invalid terrain for building
+
+                # Randomize building size
+                if random.random() < 0.2:  # 20% chance for larger building
+                    size = (4, 4)
+                else:
+                    size = (3, 3)
+
+                # Create and add the building
+                building = Building((bx, by), building_type, size)
+                chunk_buildings.append(building)
+
+                # Apply building to terrain
+                for tile_x, tile_y in building.tiles:
+                    local_tile_x = tile_x - chunk_start_x
+                    local_tile_y = tile_y - chunk_start_y
+
+                    # Check if coordinates are within this chunk
+                    if (0 <= local_tile_x < self.chunk_size and
+                            0 <= local_tile_y < self.chunk_size):
+
+                        # Check if we're placing a path or a building
+                        if (tile_x, tile_y) == (bx, by):
+                            # Center tile is the actual building
+                            chunk[local_tile_y][local_tile_x] = building_type
+                        elif chunk[local_tile_y][local_tile_x] not in [Terrain.WATER, Terrain.LAVA, Terrain.CLIFF]:
+                            # Surrounding tiles that are valid get replaced with either building or path
+                            if abs(tile_x - bx) <= size[0] // 2 and abs(tile_y - by) <= size[1] // 2:
+                                # Building tiles
+                                chunk[local_tile_y][local_tile_x] = building_type
+                            else:
+                                # Path tiles (outside building footprint)
+                                chunk[local_tile_y][local_tile_x] = Terrain.PATH
+
+        # Store the buildings for this chunk
+        if chunk_buildings:
+            self.buildings[(chunk_x, chunk_y)] = chunk_buildings
 
     def post_process_chunk(self, chunk):
         """区块后处理（优化后的版本）"""
         # 水域平滑
         chunk = self.apply_cellular_automaton(chunk,
                                               targets=[Terrain.WATER],
-                                              replace=Terrain.MUD,
+                                              replace=Terrain.SHALLOW_WATER,
                                               min_neighbors=4,
                                               iterations=3)
 
         # 熔岩区域平滑
         chunk = self.apply_cellular_automaton(chunk,
                                               targets=[Terrain.LAVA],
-                                              replace=Terrain.SAND,
+                                              replace=Terrain.BASALT,
                                               min_neighbors=3,
                                               iterations=2)
 
@@ -437,7 +858,40 @@ class GameMap:
                                               replace=Terrain.SANDSTONE,
                                               min_neighbors=5,
                                               iterations=2)
+
+        # Swamp smoothing
+        chunk = self.apply_cellular_automaton(chunk,
+                                              targets=[Terrain.SWAMP],
+                                              replace=Terrain.DARK_GRASS,
+                                              min_neighbors=3,
+                                              iterations=1)
+
+        # Path connections (make sure paths connect properly)
+        chunk = self.smooth_paths(chunk)
+
         return chunk
+
+    def smooth_paths(self, chunk):
+        """Make paths more continuous and connected"""
+        new_chunk = [row.copy() for row in chunk]
+
+        for y in range(1, self.chunk_size - 1):
+            for x in range(1, self.chunk_size - 1):
+                if chunk[y][x] != Terrain.PATH:
+                    # Count adjacent path tiles
+                    path_neighbors = 0
+                    for dy, dx in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                        if chunk[y + dy][x + dx] == Terrain.PATH:
+                            path_neighbors += 1
+
+                    # If surrounded by paths on two or more sides, convert to path
+                    if path_neighbors >= 2 and chunk[y][x] not in [Terrain.WATER, Terrain.LAVA, Terrain.CLIFF,
+                                                                   Terrain.HOUSE_GRASS, Terrain.HOUSE_FOREST,
+                                                                   Terrain.HOUSE_DESERT, Terrain.HOUSE_VOLCANO,
+                                                                   Terrain.VILLAGE_CENTER]:
+                        new_chunk[y][x] = Terrain.PATH
+
+        return new_chunk
 
     def apply_cellular_automaton(self, chunk, targets, replace, min_neighbors, iterations=2):
         """优化的细胞自动机方法"""
@@ -472,19 +926,8 @@ class GameMap:
                     chunk[y][x] = Terrain.WATER
                 elif (global_x, global_y) in self.lake_areas:
                     chunk[y][x] = Terrain.WATER
-
-    def post_process_water(self, chunk):
-        """水地形后处理"""
-        for y in range(self.chunk_size):
-            for x in range(self.chunk_size):
-                if chunk[y][x] == Terrain.WATER:
-                    neighbors = 0
-                    for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
-                        if 0 <= x + dx < self.chunk_size and 0 <= y + dy < self.chunk_size:
-                            if chunk[y + dy][x + dx] == Terrain.WATER:
-                                neighbors += 1
-                    if neighbors < 2:
-                        chunk[y][x] = Terrain.MUD
+                elif (global_x, global_y) in self.shallow_water_tiles:
+                    chunk[y][x] = Terrain.SHALLOW_WATER
 
     def is_passable(self, x, y):
         terrain = self.get_terrain(x, y)
@@ -502,8 +945,7 @@ class GameMap:
     def generate_chunk(self, chunk_x, chunk_y):
         """生成地图区块"""
         chunk = self.generate_base_terrain(chunk_x, chunk_y)
-        self.apply_water(chunk, chunk_x, chunk_y)
-        self.post_process_water(chunk)
+        # River and lake application now integrated into generate_base_terrain
         self.terrain_map[(chunk_x, chunk_y)] = chunk
 
     def draw(self, surface, camera):
@@ -522,6 +964,8 @@ class GameMap:
             for x in range(start_x, end_x + 1):
                 terrain = self.get_terrain(x, y)
                 color = COLORS["grass"]  # 默认颜色
+
+                # Map terrain type to color
                 if terrain == Terrain.GRASS:
                     color = COLORS["grass"]
                 elif terrain == Terrain.MUD:
@@ -546,6 +990,26 @@ class GameMap:
                     color = COLORS["lava"]
                 elif terrain == Terrain.WATER:
                     color = COLORS["water"]
+                elif terrain == Terrain.SHALLOW_WATER:
+                    color = COLORS["shallow_water"]
+                elif terrain == Terrain.CLIFF:
+                    color = COLORS["cliff"]
+                elif terrain == Terrain.MEADOW:
+                    color = COLORS["meadow"]
+                elif terrain == Terrain.SWAMP:
+                    color = COLORS["swamp"]
+                elif terrain == Terrain.HOUSE_GRASS:
+                    color = COLORS["house_grass"]
+                elif terrain == Terrain.HOUSE_FOREST:
+                    color = COLORS["house_forest"]
+                elif terrain == Terrain.HOUSE_DESERT:
+                    color = COLORS["house_desert"]
+                elif terrain == Terrain.HOUSE_VOLCANO:
+                    color = COLORS["house_volcano"]
+                elif terrain == Terrain.VILLAGE_CENTER:
+                    color = COLORS["village_center"]
+                elif terrain == Terrain.PATH:
+                    color = COLORS["path"]
 
                 rect = pygame.Rect(x * TILE_SIZE, y * TILE_SIZE, TILE_SIZE, TILE_SIZE)
                 screen_rect = camera.apply_rect(rect)
